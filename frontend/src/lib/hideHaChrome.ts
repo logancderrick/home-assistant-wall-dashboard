@@ -17,6 +17,7 @@ const _listeners = new Set<(hidden: boolean) => void>();
 
 const MAIN_STYLE_ID = "skydark-hide-main-chrome";
 const PANEL_STYLE_ID = "skydark-hide-panel-chrome";
+const VS_STYLE_ID = "skydark-vs-overlay-fix";
 
 const HIDE_MAIN_CSS = `
   ha-sidebar {
@@ -39,6 +40,16 @@ const HIDE_PANEL_CSS = `
   }
 `;
 
+// Voice Satellite (jxlarrea/voice-satellite-card-integration) appends its
+// overlay div to the parent frame's document.body. When Skydark is a
+// fullscreen iframe the overlay renders behind the iframe and is invisible.
+// Boosting its z-index here ensures it stacks above the iframe when triggered.
+const VS_OVERLAY_CSS = `
+  #voice-satellite-ui {
+    z-index: 2147483647 !important;
+  }
+`;
+
 // ── Subscription ──────────────────────────────────────────────────────────────
 
 /** Subscribe to hidden-state changes. Returns an unsubscribe function. */
@@ -49,6 +60,21 @@ export function onHaChromeStateChange(fn: (hidden: boolean) => void): () => void
 
 export function isHaChromeHidden(): boolean {
   return _hidden;
+}
+
+// ── Voice Satellite overlay fix ───────────────────────────────────────────────
+
+function injectVsOverlayFix() {
+  try {
+    const parentDoc = window.parent.document;
+    if (parentDoc.getElementById(VS_STYLE_ID)) return;
+    const style = parentDoc.createElement("style");
+    style.id = VS_STYLE_ID;
+    style.textContent = VS_OVERLAY_CSS;
+    parentDoc.head.appendChild(style);
+  } catch {
+    // cross-origin or not in iframe
+  }
 }
 
 // ── Shadow root helpers ───────────────────────────────────────────────────────
@@ -213,6 +239,10 @@ export function hideHaChromeWhenReady(
   intervalMs = 300,
 ): () => void {
   if (window.parent === window) return () => {};
+
+  // Apply the VS overlay z-index fix immediately — it is safe to inject before
+  // HA's shadow DOM is ready because it targets document.head, not a shadow root.
+  injectVsOverlayFix();
 
   let attempts = 0;
 
