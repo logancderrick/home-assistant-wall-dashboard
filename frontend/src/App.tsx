@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import MainLayout from "./components/Layout/MainLayout";
 import SimulatedViewport from "./components/dev/SimulatedViewport";
@@ -6,13 +6,30 @@ import ViewportIndicator from "./components/dev/ViewportIndicator";
 import ErrorBoundary from "./components/Common/ErrorBoundary";
 import { useViewportSimulator } from "./contexts/ViewportSimulatorContext";
 
-function ViewErrorFallback() {
+const AUTO_RESET_MS = 30_000;
+
+function ViewErrorFallback({ onReset }: { onReset?: () => void }) {
+  useEffect(() => {
+    if (!onReset) return;
+    const timer = setTimeout(onReset, AUTO_RESET_MS);
+    return () => clearTimeout(timer);
+  }, [onReset]);
+
   return (
     <div className="flex flex-col items-center justify-center h-full gap-4 p-8 text-center">
       <p className="text-skydark-text">This section failed to load.</p>
       <a href="#/calendar" className="text-skydark-accent font-medium underline">
         Go to Calendar
       </a>
+      {onReset && (
+        <button
+          type="button"
+          onClick={onReset}
+          className="px-4 py-2 rounded-xl bg-skydark-surface-muted text-skydark-text font-medium"
+        >
+          Try again
+        </button>
+      )}
       <button
         type="button"
         onClick={() => window.location.reload()}
@@ -56,7 +73,7 @@ function App() {
 
   const content = (
     <MainLayout>
-      <ErrorBoundary fallback={<ViewErrorFallback />}>
+      <ErrorBoundary fallback={(reset) => <ViewErrorFallback onReset={reset} />}>
         <Suspense fallback={<PageLoader />}>
           <Routes>
             <Route path="/" element={<Navigate to="/calendar" replace />} />

@@ -85,9 +85,21 @@ export interface SkydarkConfig {
   config?: { family_name?: string; weather_entity?: string };
 }
 
+const SEND_TIMEOUT_MS = 20_000;
+
 function send<T>(conn: Connection, message: { type: string; [key: string]: unknown }): Promise<T> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return conn.sendMessagePromise(message as any) as Promise<T>;
+  const msgPromise = conn.sendMessagePromise(message as any) as Promise<T>;
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("HA WebSocket request timed out")),
+      SEND_TIMEOUT_MS,
+    );
+    msgPromise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
 }
 
 export async function fetchEvents(

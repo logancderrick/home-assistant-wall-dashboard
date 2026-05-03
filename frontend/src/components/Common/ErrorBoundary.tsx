@@ -2,8 +2,8 @@ import { Component, type ReactNode, type ErrorInfo } from "react";
 
 interface Props {
   children: ReactNode;
-  /** Optional custom UI when an error is caught (e.g. per-view recovery). */
-  fallback?: ReactNode;
+  /** Optional custom UI when an error is caught. Pass a render function to receive a reset callback. */
+  fallback?: ReactNode | ((reset: () => void) => ReactNode);
 }
 
 interface State {
@@ -27,7 +27,11 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
+      const reset = () => this.setState({ hasError: false, error: null });
       if (this.props.fallback) {
+        if (typeof this.props.fallback === "function") {
+          return this.props.fallback(reset);
+        }
         return this.props.fallback;
       }
       return (

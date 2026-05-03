@@ -3,9 +3,9 @@
  * with loading/error state and retry. Used by views and AppContext to sync from backend.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { buildDemoSkydarkState } from "../dev/demoSkydarkData";
-import { getHAConnection } from "../lib/haConnection";
+import { getHAConnection, clearHAConnection } from "../lib/haConnection";
 import { isSkydarkDemo } from "../lib/demoMode";
 import type { Connection } from "home-assistant-js-websocket";
 import {
@@ -201,6 +201,24 @@ export function useSkydarkData(
       // keep previous lists on partial failure
     }
   }, [data.connection]);
+
+  // Auto-retry on error: clears stale connection and retries with exponential backoff.
+  // Resets when error clears so subsequent failures start fresh.
+  const retryCountRef = useRef(0);
+  useEffect(() => {
+    if (!data.error) {
+      retryCountRef.current = 0;
+      return;
+    }
+    if (isSkydarkDemo) return;
+    const delay = Math.min(15_000 * Math.pow(1.5, retryCountRef.current), 60_000);
+    const timer = setTimeout(() => {
+      retryCountRef.current++;
+      clearHAConnection();
+      void refetch();
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [data.error, refetch]);
 
   useEffect(() => {
     if (isSkydarkDemo) {
