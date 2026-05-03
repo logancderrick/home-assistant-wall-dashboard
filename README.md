@@ -4,9 +4,9 @@ A full-screen family command center for Home Assistant — calendar, tasks, list
 
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Custom%20Integration-41BDF5?logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom%20Repository-41BDF5)](https://hacs.xyz/)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/logancderrick/SkyDark-Retooled/releases)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/logancderrick/home-assistant-wall-dashboard/releases)
 
-> **This is [Logan's fork](https://github.com/logancderrick/SkyDark-Retooled) of [SkyDark by HunterJacobs](https://github.com/HunterJacobs/SkyDark).** The integration ID (`skydark_calendar`) is unchanged so existing installs can migrate. The UI and feature set have been significantly extended — custom weather backgrounds, sleep/screensaver mode, improved camera previews, and more.
+> Built for the Derrick household. Originally inspired by and forked from [SkyDark by HunterJacobs](https://github.com/HunterJacobs/SkyDark) — the integration ID (`skydark_calendar`) is preserved so existing SkyDark installs can migrate without data loss.
 
 ---
 
@@ -15,15 +15,15 @@ A full-screen family command center for Home Assistant — calendar, tasks, list
 | Area | What it does |
 |------|--------------|
 | **Calendar** | Month / week / day views, HA calendar entity merging with per-source colors, independent scrolling grid |
-| **Weather card** | Custom background image, animated ambient effects (rain, clouds, sun), current temp, hi/lo, humidity, sunrise/sunset, 9-day scrollable forecast |
-| **Camera preview** | Live camera strip on the calendar dashboard; configures up to 2 `camera.*` entities that rotate on a timer |
-| **Tasks / Chores** | Per-person tasks, routine frequencies, completion tracking, points system |
+| **Weather card** | Custom background image, animated ambient effects (rain, clouds, sun, snow, lightning), current temp, hi/lo, humidity, sunrise/sunset, 9-day scrollable forecast |
+| **Camera preview** | Live camera strip on the calendar dashboard; up to 2 `camera.*` entities that rotate on a timer |
+| **Tasks / Chores** | Per-person task columns, routine frequencies (daily/weekly/custom), completion tracking, points system |
 | **Lists** | Grocery and custom lists; items persist through Home Assistant services |
 | **Meals** | Weekly meal planner with ingredient generation |
 | **Rewards** | Points and reward redemption per family member |
 | **Photos** | Family photo upload, full-screen slideshow view |
 | **Sleep mode** | Screensaver with rotating photo backgrounds (shuffles every 60 s), rotating live camera card, and live weather overlay |
-| **Cameras** | Full camera tab — HLS streams with MJPEG fallback, fullscreen tap, auth aligned with HA |
+| **Cameras** | Full camera tab — HLS streams with MJPEG fallback, WebRTC support, fullscreen tap |
 | **Settings** | Family profiles, PIN lock, feature toggles, remote calendar config, camera entity config |
 
 Data is stored locally in your HA config as SQLite. No cloud dependency.
@@ -33,19 +33,19 @@ Data is stored locally in your HA config as SQLite. No cloud dependency.
 ## Install via HACS (recommended)
 
 1. Open **HACS** → **Integrations** → **⋮ Custom repositories**
-2. Add **`https://github.com/logancderrick/SkyDark-Retooled`** — category **Integration**
+2. Add **`https://github.com/logancderrick/home-assistant-wall-dashboard`** — category **Integration**
 3. Search for **Skydark Family Calendar** and install
 4. **Restart Home Assistant**
 5. Go to **Settings → Devices & Services → Add Integration → Skydark Family Calendar**
 6. Open **Skydark Calendar** from the HA sidebar
 
-> **Migrating from the upstream repo?** Switch the HACS custom repository URL to this fork to receive updates here. The integration domain (`skydark_calendar`) is the same so your existing data is preserved.
+> **Migrating from HunterJacobs/SkyDark?** Switch the HACS custom repository URL to this repo. The integration domain (`skydark_calendar`) is the same, so your existing data is preserved.
 
 ---
 
 ## Manual install
 
-1. Download this repo as a ZIP from the [latest release](https://github.com/logancderrick/SkyDark-Retooled/releases/latest)
+1. Download this repo as a ZIP from the [latest release](https://github.com/logancderrick/home-assistant-wall-dashboard/releases/latest)
 2. Extract and copy `custom_components/skydark_calendar/` into your HA `config/custom_components/` directory
 3. Restart Home Assistant
 4. Add **Skydark Family Calendar** in **Settings → Devices & Services**
@@ -62,7 +62,7 @@ Skydark is configured entirely through the Home Assistant UI — **Settings → 
 
 ### Weather card background
 
-The weather card on the calendar page supports a custom background image. Place a PNG or JPG in `frontend/public/` (named without spaces), then reference it in `ImprovedWeatherCard.tsx`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full dev setup.
+The weather card supports a custom background image. Place a PNG or JPG in `frontend/public/` (named without spaces), then reference it in `ImprovedWeatherCard.tsx`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full dev setup.
 
 ---
 
@@ -92,7 +92,7 @@ Full service schemas are available in **Settings → Devices & Services → Skyd
 | **White screen / 403 on open** | Restart Home Assistant fully after installing or updating |
 | **"Does not support configuration via YAML"** | Remove `skydark_calendar:` from `configuration.yaml`, then restart HA |
 | **Camera streams 403** | Ensure you are logged into HA in the same browser; the panel sends Bearer tokens for HLS and camera tokens for MJPEG |
-| **Old UI showing after HACS update** | Unregister the HA service worker in browser DevTools → Application → Service Workers, then refresh |
+| **Old UI showing after update** | Unregister the HA service worker in browser DevTools → Application → Service Workers, then refresh |
 | **Font or layout console warnings** | Usually from the HA browser sandbox — generally harmless |
 
 ---
@@ -124,7 +124,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for full architecture notes, environment 
 
 ## Attribution
 
-- **Original project:** [SkyDark by HunterJacobs](https://github.com/HunterJacobs/SkyDark) — the foundation this fork builds on
-- **This fork:** [logancderrick/SkyDark-Retooled](https://github.com/logancderrick/SkyDark-Retooled) — maintained for the Derrick household; issues and PRs welcome
+This project grew out of [SkyDark by HunterJacobs](https://github.com/HunterJacobs/SkyDark), which provided the original foundation — backend architecture, HA integration structure, and core UI concepts. Significant portions of the codebase originate from that work. The integration domain (`skydark_calendar`) is intentionally unchanged to allow seamless migration for existing SkyDark users.
 
-If Skydark helps your household, a ⭐ on either repo helps others find it.
+If this helps your household, a ⭐ on [HunterJacobs/SkyDark](https://github.com/HunterJacobs/SkyDark) helps credit the original work.

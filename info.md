@@ -19,4 +19,4 @@ Add the integration under **Settings → Devices & services** (config flow). Do 
 
 ## Documentation
 
-Full install, setup, and usage details: [github.com/HunterJacobs/SkyDark](https://github.com/HunterJacobs/SkyDark)
+Full install, setup, and usage details: [github.com/logancderrick/home-assistant-wall-dashboard](https://github.com/logancderrick/home-assistant-wall-dashboard)

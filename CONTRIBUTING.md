@@ -123,4 +123,4 @@ Changing data or HA behavior: work in `custom_components/skydark_calendar/` (dat
 
 ## Questions or issues
 
-Open an issue or discussion on [this fork’s GitHub](https://github.com/logancderrick/SkyDark-Retooled). For install/config problems, check the [README Troubleshooting](README.md#troubleshooting) section first. The original project is [HunterJacobs/SkyDark](https://github.com/HunterJacobs/SkyDark).
+Open an issue or discussion on [GitHub](https://github.com/logancderrick/home-assistant-wall-dashboard). For install/config problems, check the [README Troubleshooting](README.md#troubleshooting) section first. This project originated from [HunterJacobs/SkyDark](https://github.com/HunterJacobs/SkyDark).

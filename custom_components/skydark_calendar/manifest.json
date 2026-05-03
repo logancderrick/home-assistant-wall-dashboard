@@ -4,9 +4,9 @@
   "codeowners": ["@logancderrick"],
   "config_flow": true,
   "dependencies": ["frontend", "http"],
-  "documentation": "https://github.com/logancderrick/SkyDark-Retooled",
+  "documentation": "https://github.com/logancderrick/home-assistant-wall-dashboard",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/logancderrick/SkyDark-Retooled/issues",
+  "issue_tracker": "https://github.com/logancderrick/home-assistant-wall-dashboard/issues",
   "requirements": [],
   "version": "1.0.0"
 }

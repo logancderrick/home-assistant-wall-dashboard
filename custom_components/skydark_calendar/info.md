@@ -13,4 +13,4 @@ A family organization panel for Home Assistant with calendar, chores, lists, mea
 
 ## Documentation
 
-See the [repository README](https://github.com/HunterJacobs/SkyDark) for full installation (HACS or manual), configuration, services, and development.
+See the [repository README](https://github.com/logancderrick/home-assistant-wall-dashboard) for full installation (HACS or manual), configuration, services, and development.
