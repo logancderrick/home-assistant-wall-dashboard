@@ -15,6 +15,7 @@ import {
   DisplayIcon,
   LockIcon,
   DeveloperIcon,
+  VoiceIcon,
 } from "../components/Settings/SettingsIcons";
 import { useViewportSimulator } from "../contexts/ViewportSimulatorContext";
 import { VIEWPORT_PRESETS } from "../lib/viewportPresets";
@@ -685,6 +686,51 @@ export default function SettingsView() {
                 >
                   Reset to real device
                 </button>
+              </div>
+            </SettingsSection>
+          </>
+        )}
+
+        {activeSection === "voice" && (
+          <>
+            <h2 className="text-xl font-semibold text-skydark-text mb-6">Voice Control</h2>
+            <SettingsSection title="Voice Satellite" icon={<VoiceIcon className="w-5 h-5 text-skydark-text-secondary" />}>
+              <p className="text-sm text-skydark-text-secondary mb-4">
+                Connect this panel to a Voice Satellite entity for hands-free control.
+                The entity must be configured with the <span className="font-mono">voice_satellite</span> custom component.
+              </p>
+              <div className="py-3">
+                <label className="block text-sm font-medium text-skydark-text mb-1.5">
+                  Assist Satellite entity ID
+                </label>
+                <input
+                  type="text"
+                  className="input-skydark w-full max-w-lg font-mono text-sm"
+                  placeholder="assist_satellite.wall_panel"
+                  value={settings.voiceSatelliteEntityId ?? ""}
+                  onChange={(e) => setSettings({ voiceSatelliteEntityId: e.target.value.trim() || "" })}
+                  spellCheck={false}
+                />
+                <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
+                  Leave empty to disable voice control. The entity_id must match the one configured in the
+                  voice_satellite integration.
+                </p>
+              </div>
+              <div className="py-3">
+                <label className="block text-sm font-medium text-skydark-text mb-1.5">
+                  Pipeline ID (optional)
+                </label>
+                <input
+                  type="text"
+                  className="input-skydark w-full max-w-lg font-mono text-sm"
+                  placeholder="Leave empty for default pipeline"
+                  value={settings.voicePipelineId ?? ""}
+                  onChange={(e) => setSettings({ voicePipelineId: e.target.value.trim() || "" })}
+                  spellCheck={false}
+                />
+                <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
+                  Specify a custom pipeline ID if you have multiple pipelines configured.
+                </p>
               </div>
             </SettingsSection>
           </>

@@ -9,9 +9,10 @@ import {
   DisplayIcon,
   LockIcon,
   DeveloperIcon,
+  VoiceIcon,
 } from "./SettingsIcons";
 
-export type SettingsSectionId = "general" | "calendar" | "display" | "lock" | "developer";
+export type SettingsSectionId = "general" | "calendar" | "display" | "lock" | "voice" | "developer";
 
 interface NavItem {
   id: SettingsSectionId;
@@ -24,6 +25,7 @@ const navItems: NavItem[] = [
   { id: "calendar", label: "Calendar", Icon: CalendarSettingsIcon },
   { id: "display", label: "Display", Icon: DisplayIcon },
   { id: "lock", label: "Lock", Icon: LockIcon },
+  { id: "voice", label: "Voice", Icon: VoiceIcon },
   { id: "developer", label: "Developer", Icon: DeveloperIcon },
 ];
 

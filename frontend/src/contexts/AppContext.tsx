@@ -112,6 +112,10 @@ export interface AppSettings {
   calendarPreviewRotateSeconds: number;
   /** Overall UI palette: light (default) or dark. */
   themePreference: "light" | "dark";
+  /** Voice satellite entity ID (e.g. "assist_satellite.wall_panel") for hands-free control. */
+  voiceSatelliteEntityId?: string;
+  /** Optional pipeline ID override for voice satellite; undefined = use default pipeline. */
+  voicePipelineId?: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -127,6 +131,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   calendarPreviewCameras: [],
   calendarPreviewRotateSeconds: 20,
   themePreference: "light",
+  voiceSatelliteEntityId: "",
+  voicePipelineId: "",
 };
 
 interface AppState {
@@ -235,6 +241,12 @@ function normalizeSettings(candidate: Partial<AppSettings> | null | undefined): 
   merged.calendarPreviewRotateSeconds = Math.min(120, Math.max(10, rotateSec));
   if (merged.themePreference !== "light" && merged.themePreference !== "dark") {
     merged.themePreference = "light";
+  }
+  if (typeof merged.voiceSatelliteEntityId !== "string") {
+    merged.voiceSatelliteEntityId = "";
+  }
+  if (typeof merged.voicePipelineId !== "string") {
+    merged.voicePipelineId = "";
   }
   return merged;
 }

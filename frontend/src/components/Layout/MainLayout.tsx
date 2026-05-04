@@ -3,6 +3,8 @@ import { useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import MobileNav from "./MobileNav";
 import Header from "./Header";
+import VoiceButton from "../Voice/VoiceButton";
+import VoiceOverlay from "../Voice/VoiceOverlay";
 import { useAppContext } from "../../contexts/AppContext";
 import { isSkydarkDemo } from "../../lib/demoMode";
 import { useIdleDetection } from "../../hooks/useIdleDetection";
@@ -93,6 +95,8 @@ export default function MainLayout({ children }: MainLayoutProps) {
         </main>
         {isPortrait && <MobileNav position="bottom" forceVisible iconOnly />}
       </div>
+      <VoiceButton />
+      <VoiceOverlay />
     </div>
   );
 }

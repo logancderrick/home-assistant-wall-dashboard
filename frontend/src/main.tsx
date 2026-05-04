@@ -5,6 +5,7 @@ import { routerFutureFlags } from "./lib/routerFutureFlags";
 import { AppProvider } from "./contexts/AppContext";
 import { SkydarkDataProvider } from "./contexts/SkydarkDataContext";
 import { ViewportSimulatorProvider } from "./contexts/ViewportSimulatorContext";
+import { VoiceProvider } from "./contexts/VoiceContext";
 import ErrorBoundary from "./components/Common/ErrorBoundary";
 import AppBootstrapGate from "./components/AppBootstrapGate";
 import App from "./App";
@@ -26,11 +27,13 @@ if (!rootEl) {
         <HashRouter future={routerFutureFlags}>
           <SkydarkDataProvider>
             <AppProvider>
-              <AppBootstrapGate>
-                <ViewportSimulatorProvider>
-                  <App />
-                </ViewportSimulatorProvider>
-              </AppBootstrapGate>
+              <VoiceProvider>
+                <AppBootstrapGate>
+                  <ViewportSimulatorProvider>
+                    <App />
+                  </ViewportSimulatorProvider>
+                </AppBootstrapGate>
+              </VoiceProvider>
             </AppProvider>
           </SkydarkDataProvider>
         </HashRouter>
