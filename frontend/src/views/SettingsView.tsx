@@ -696,7 +696,7 @@ export default function SettingsView() {
             <h2 className="text-xl font-semibold text-skydark-text mb-6">Voice Control</h2>
             <SettingsSection title="Voice Satellite" icon={<VoiceIcon className="w-5 h-5 text-skydark-text-secondary" />}>
               <p className="text-sm text-skydark-text-secondary mb-4">
-                Connect this panel to a Voice Satellite entity for hands-free control.
+                Connect this panel to a Voice Satellite entity for hands-free "Hey Jarvis" voice control.
                 The entity must be configured with the <span className="font-mono">voice_satellite</span> custom component.
               </p>
               <div className="py-3">
@@ -730,6 +730,28 @@ export default function SettingsView() {
                 />
                 <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
                   Specify a custom pipeline ID if you have multiple pipelines configured.
+                </p>
+              </div>
+              <div className="py-3">
+                <label className="block text-sm font-medium text-skydark-text mb-3">
+                  Wake Word Sensitivity
+                </label>
+                <div className="flex items-center gap-3 max-w-lg">
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                    className="flex-1 accent-skydark-accent"
+                    value={settings.wakeWordSensitivity ?? 0.5}
+                    onChange={(e) => setSettings({ wakeWordSensitivity: parseFloat(e.target.value) })}
+                  />
+                  <span className="text-sm font-mono text-skydark-text-secondary w-12 text-right">
+                    {((settings.wakeWordSensitivity ?? 0.5) * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
+                  Lower = more stable but slower to detect. Higher = faster but more false positives. Start with 50%.
                 </p>
               </div>
             </SettingsSection>

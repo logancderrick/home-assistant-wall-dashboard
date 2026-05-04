@@ -116,6 +116,10 @@ export interface AppSettings {
   voiceSatelliteEntityId?: string;
   /** Optional pipeline ID override for voice satellite; undefined = use default pipeline. */
   voicePipelineId?: string;
+  /** Wake word sensitivity for "Hey Jarvis" detection (0.0-1.0, default 0.5). */
+  wakeWordSensitivity?: number;
+  /** Enable wake word detection (default true when entity ID is configured). */
+  wakeWordEnabled?: boolean;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -133,6 +137,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   themePreference: "light",
   voiceSatelliteEntityId: "",
   voicePipelineId: "",
+  wakeWordSensitivity: 0.5,
+  wakeWordEnabled: true,
 };
 
 interface AppState {
@@ -247,6 +253,12 @@ function normalizeSettings(candidate: Partial<AppSettings> | null | undefined): 
   }
   if (typeof merged.voicePipelineId !== "string") {
     merged.voicePipelineId = "";
+  }
+  if (typeof merged.wakeWordSensitivity !== "number" || merged.wakeWordSensitivity < 0 || merged.wakeWordSensitivity > 1) {
+    merged.wakeWordSensitivity = 0.5;
+  }
+  if (typeof merged.wakeWordEnabled !== "boolean") {
+    merged.wakeWordEnabled = true;
   }
   return merged;
 }

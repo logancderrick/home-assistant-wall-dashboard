@@ -1,6 +1,6 @@
 /**
  * Voice Satellite integration context.
- * Manages voice pipeline state, audio capture, and HA communication.
+ * Manages voice pipeline state, audio capture, wake word detection, and HA communication.
  */
 
 import {
@@ -10,6 +10,7 @@ import {
   useEffect,
   useRef,
   useCallback,
+  useState,
   type ReactNode,
 } from 'react';
 import type { Connection } from 'home-assistant-js-websocket';
@@ -19,6 +20,7 @@ import { VoiceState, type VoiceStateValue } from '../lib/voice/constants';
 import { createAudioCapture } from '../lib/voice/audioCapture';
 import { createPipelineComms } from '../lib/voice/pipelineComms';
 import { createTtsPlayer } from '../lib/voice/ttsPlayer';
+import { createWakeWordDetector, type WakeWordDetector } from '../lib/voice/wakeWord';
 import type { AnnounceFinishedMsg, SubscribeEventsMsg, UpdateStateMsg } from '../lib/voice/wsTypes';
 import { isSkydarkDemo } from '../lib/demoMode';
 
@@ -27,6 +29,10 @@ export interface VoiceContextValue {
   transcript: string;
   error: string | null;
   isEnabled: boolean;
+  isListeningForWakeWord: boolean;
+  wakeWordDetected: boolean;
+  wakeWordSensitivity: number;
+  setWakeWordSensitivity: (value: number) => void;
   startListening: () => Promise<void>;
   stopListening: () => void;
   dismiss: () => void;
@@ -46,6 +52,8 @@ export function useVoiceContext(): VoiceContextValue {
 
 type VoiceAction =
   | { type: 'START' }
+  | { type: 'WAKE_WORD_LISTENING' }
+  | { type: 'WAKE_WORD_DETECTED' }
   | { type: 'CONNECTING' }
   | { type: 'LISTENING' }
   | { type: 'PROCESSING' }
@@ -56,12 +64,16 @@ type VoiceAction =
 
 interface VoiceState {
   state: VoiceStateValue;
+  isListeningForWakeWord: boolean;
+  wakeWordDetected: boolean;
   transcript: string;
   error: string | null;
 }
 
 const initialVoiceState: VoiceState = {
   state: VoiceState.IDLE,
+  isListeningForWakeWord: false,
+  wakeWordDetected: false,
   transcript: '',
   error: null,
 };
@@ -69,11 +81,30 @@ const initialVoiceState: VoiceState = {
 function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState {
   switch (action.type) {
     case 'START':
-      return { ...state, state: VoiceState.IDLE, error: null };
+      return {
+        ...state,
+        state: VoiceState.IDLE,
+        isListeningForWakeWord: true,
+        error: null,
+      };
+    case 'WAKE_WORD_LISTENING':
+      return { ...state, isListeningForWakeWord: true, wakeWordDetected: false };
+    case 'WAKE_WORD_DETECTED':
+      return { ...state, wakeWordDetected: true };
     case 'CONNECTING':
-      return { ...state, state: VoiceState.CONNECTING, error: null };
+      return {
+        ...state,
+        state: VoiceState.CONNECTING,
+        isListeningForWakeWord: false,
+        error: null,
+      };
     case 'LISTENING':
-      return { ...state, state: VoiceState.LISTENING, error: null, transcript: '' };
+      return {
+        ...state,
+        state: VoiceState.LISTENING,
+        error: null,
+        transcript: '',
+      };
     case 'PROCESSING':
       return { ...state, state: VoiceState.PROCESSING, error: null };
     case 'RESPONDING':
@@ -84,11 +115,27 @@ function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState {
         transcript: action.transcript,
       };
     case 'DONE':
-      return { ...state, state: VoiceState.IDLE };
+      return {
+        ...state,
+        state: VoiceState.IDLE,
+        isListeningForWakeWord: true,
+        wakeWordDetected: false,
+      };
     case 'ERROR':
-      return { ...state, state: VoiceState.ERROR, error: action.message };
+      return {
+        ...state,
+        state: VoiceState.ERROR,
+        error: action.message,
+        isListeningForWakeWord: true,
+      };
     case 'DISMISS':
-      return { ...state, state: VoiceState.IDLE, error: null };
+      return {
+        ...state,
+        state: VoiceState.IDLE,
+        isListeningForWakeWord: true,
+        wakeWordDetected: false,
+        error: null,
+      };
     default:
       return state;
   }
@@ -102,17 +149,20 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   const app = useAppContext();
   const skydark = useSkydarkDataContext();
   const [voiceState, dispatch] = useReducer(voiceReducer, initialVoiceState);
+  const [wakeWordSensitivity, setWakeWordSensitivityState] = useState(0.5);
 
   const conn = skydark?.data?.connection ?? null;
   const entityId = app.settings.voiceSatelliteEntityId ?? '';
   const pipelineId = app.settings.voicePipelineId ?? '';
   const isEnabled = entityId.trim().length > 0 && conn !== null;
 
-  // Ref to avoid recreating on every render
+  // Refs for managers
   const currentHandlerIdRef = useRef(0);
+  const wakeWordDetectorRef = useRef<WakeWordDetector | null>(null);
+  const isDetectingRef = useRef(false);
   const handlersRef = useRef({
     audio: createAudioCapture({
-      onChunk: () => {}, // will be set in startListening
+      onChunk: () => {}, // will be set below
       onError: (err) => {
         dispatch({ type: 'ERROR', message: err.message });
       },
@@ -120,6 +170,74 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     pipeline: createPipelineComms(),
     tts: createTtsPlayer(),
   });
+
+  // Initialize wake word detector once
+  useEffect(() => {
+    if (isSkydarkDemo || !isEnabled) return;
+
+    const initWakeWordDetector = async () => {
+      try {
+        wakeWordDetectorRef.current = await createWakeWordDetector((confidence) => {
+          if (confidence > 0.5) {
+            dispatch({ type: 'WAKE_WORD_DETECTED' });
+          }
+        });
+        wakeWordDetectorRef.current.setConfig({ sensitivity: wakeWordSensitivity });
+      } catch (err) {
+        console.warn('Failed to initialize wake word detector:', err);
+      }
+    };
+
+    void initWakeWordDetector();
+
+    return () => {
+      wakeWordDetectorRef.current?.cleanup();
+      wakeWordDetectorRef.current = null;
+    };
+  }, [isEnabled, wakeWordSensitivity]);
+
+  // Start always-on audio capture for wake word detection
+  useEffect(() => {
+    if (!isEnabled || isSkydarkDemo) return;
+
+    const startWakeWordListening = async () => {
+      try {
+        const { audio } = handlersRef.current;
+        const detector = wakeWordDetectorRef.current;
+
+        // Set up audio chunk handler for wake word detection
+        audio.onChunk = async (pcm: Int16Array) => {
+          if (detector && isDetectingRef.current) {
+            const { detected } = await detector.detect(pcm);
+            if (detected && voiceState.state === VoiceState.IDLE) {
+              // Trigger pipeline start
+              void startListening();
+            }
+          }
+
+          // Also send to pipeline if pipeline is active
+          if (currentHandlerIdRef.current > 0) {
+            handlersRef.current.pipeline.sendAudioChunk(conn, currentHandlerIdRef.current, pcm);
+          }
+        };
+
+        // Start audio capture
+        await audio.start();
+        isDetectingRef.current = true;
+        dispatch({ type: 'WAKE_WORD_LISTENING' });
+      } catch (err) {
+        console.warn('Failed to start wake word listening:', err);
+        dispatch({ type: 'ERROR', message: 'Failed to access microphone' });
+      }
+    };
+
+    void startWakeWordListening();
+
+    return () => {
+      isDetectingRef.current = false;
+      handlersRef.current.audio.stop();
+    };
+  }, [conn, isEnabled]);
 
   // Subscribe to voice_satellite events (announcements, wake, etc.)
   useEffect(() => {
@@ -142,14 +260,12 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
             const mediaId = evt.media_id as string | undefined;
             if (mediaId) {
               try {
-                // Convert media_id to HTTP-accessible URL
                 const url = `/api/skydark_calendar/photo/${mediaId}`;
                 await handlersRef.current.tts.play(url);
               } catch (err) {
                 console.warn('Failed to play announcement', err);
               }
 
-              // Send ACK
               const ackMsg: AnnounceFinishedMsg = {
                 type: 'voice_satellite/announce_finished',
                 entity_id: entityId,
@@ -179,21 +295,10 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
 
     try {
       dispatch({ type: 'CONNECTING' });
+      isDetectingRef.current = false;
 
-      const handlers = handlersRef.current;
-      const { pipeline, audio, tts } = handlers;
+      const { pipeline } = handlersRef.current;
 
-      // Start audio capture with handler reference for PCM chunks
-      audio.onChunk = (pcm: Int16Array) => {
-        if (currentHandlerIdRef.current > 0) {
-          pipeline.sendAudioChunk(conn, currentHandlerIdRef.current, pcm);
-        }
-      };
-
-      await audio.start();
-      dispatch({ type: 'LISTENING' });
-
-      // Start pipeline
       const { handlerId } = await pipeline.start(
         conn,
         {
@@ -214,22 +319,23 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
             // End of TTS
           },
           onRunEnd: () => {
-            audio.stop();
             currentHandlerIdRef.current = 0;
+            isDetectingRef.current = true;
             dispatch({ type: 'DONE' });
           },
           onError: (code: string, message: string) => {
-            audio.stop();
             currentHandlerIdRef.current = 0;
+            isDetectingRef.current = true;
             dispatch({ type: 'ERROR', message });
           },
         }
       );
 
       currentHandlerIdRef.current = handlerId;
+      dispatch({ type: 'LISTENING' });
     } catch (err) {
-      handlersRef.current.audio.stop();
       currentHandlerIdRef.current = 0;
+      isDetectingRef.current = true;
       dispatch({
         type: 'ERROR',
         message: err instanceof Error ? err.message : String(err),
@@ -240,7 +346,8 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   const stopListening = useCallback(() => {
     if (!conn || !isEnabled) return;
     try {
-      handlersRef.current.audio.stop();
+      currentHandlerIdRef.current = 0;
+      isDetectingRef.current = true;
       dispatch({ type: 'DONE' });
     } catch (err) {
       console.warn('Error stopping audio', err);
@@ -249,6 +356,13 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
 
   const dismiss = useCallback(() => {
     dispatch({ type: 'DISMISS' });
+  }, []);
+
+  const handleSetWakeWordSensitivity = useCallback((value: number) => {
+    setWakeWordSensitivityState(value);
+    if (wakeWordDetectorRef.current) {
+      wakeWordDetectorRef.current.setConfig({ sensitivity: value });
+    }
   }, []);
 
   // Update entity state in HA
@@ -273,6 +387,10 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     transcript: voiceState.transcript,
     error: voiceState.error,
     isEnabled,
+    isListeningForWakeWord: voiceState.isListeningForWakeWord,
+    wakeWordDetected: voiceState.wakeWordDetected,
+    wakeWordSensitivity,
+    setWakeWordSensitivity: handleSetWakeWordSensitivity,
     startListening,
     stopListening,
     dismiss,
