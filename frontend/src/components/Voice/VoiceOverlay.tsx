@@ -9,11 +9,9 @@ import { VoiceState } from '../../lib/voice/constants';
 import VoiceMicIcon from './VoiceMicIcon';
 
 export default function VoiceOverlay() {
-  const { voiceState, transcript, error, dismiss } = useVoiceContext();
+  const { voiceState, transcript, error, dismiss, wakePulse } = useVoiceContext();
 
-  const isVisible =
-    voiceState !== VoiceState.IDLE ||
-    (voiceState === VoiceState.ERROR && error !== null);
+  const isVisible = voiceState !== VoiceState.IDLE;
 
   return (
     <AnimatePresence>
@@ -34,15 +32,25 @@ export default function VoiceOverlay() {
           >
             {voiceState === VoiceState.CONNECTING && (
               <>
-                <div className="mb-6">
+                <div className="mb-6 relative flex justify-center">
+                  {wakePulse && (
+                    <motion.span
+                      className="absolute inset-0 m-auto h-16 w-16 rounded-full border-2 border-skydark-accent pointer-events-none"
+                      initial={{ scale: 0.85, opacity: 0.85 }}
+                      animate={{ scale: 1.45, opacity: 0 }}
+                      transition={{ duration: 0.55, ease: 'easeOut' }}
+                    />
+                  )}
                   <motion.div
                     animate={{ opacity: [0.5, 1, 0.5] }}
                     transition={{ duration: 1.5, repeat: Infinity }}
                   >
-                    <VoiceMicIcon className="w-12 h-12 text-skydark-accent mx-auto" />
+                    <VoiceMicIcon className="w-12 h-12 text-skydark-accent mx-auto relative z-10" />
                   </motion.div>
                 </div>
-                <p className="text-skydark-text-secondary text-sm">Connecting...</p>
+                <p className="text-skydark-text-secondary text-sm">
+                  {wakePulse ? 'Heard you — connecting…' : 'Connecting…'}
+                </p>
               </>
             )}
 

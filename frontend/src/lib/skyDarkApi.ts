@@ -297,6 +297,43 @@ export async function fetchAppSettings(conn: Connection): Promise<{
   return send(conn, { type: "skydark_calendar/get_app_settings" });
 }
 
+export interface AssistPipelineSummary {
+  id: string;
+  name: string;
+}
+
+function normalizePipelineRows(rows: unknown[]): AssistPipelineSummary[] {
+  const out: AssistPipelineSummary[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const r = row as Record<string, unknown>;
+    const id = typeof r.id === "string" ? r.id : "";
+    if (!id) continue;
+    const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : id;
+    out.push({ id, name });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+
+function normalizePipelineList(raw: unknown): AssistPipelineSummary[] {
+  if (Array.isArray(raw)) return normalizePipelineRows(raw);
+  if (raw && typeof raw === "object" && "pipelines" in raw) {
+    const p = (raw as { pipelines: unknown }).pipelines;
+    if (Array.isArray(p)) return normalizePipelineRows(p);
+  }
+  return [];
+}
+
+/** Lists Assist pipeline IDs from Home Assistant (requires assist_pipeline). */
+export async function fetchAssistPipelines(conn: Connection): Promise<AssistPipelineSummary[]> {
+  try {
+    const res = await send<unknown>(conn, { type: "assist_pipeline/pipeline/list" });
+    return normalizePipelineList(res);
+  } catch {
+    return [];
+  }
+}
+
 export async function saveAppSettings(
   conn: Connection,
   settings: Record<string, unknown>

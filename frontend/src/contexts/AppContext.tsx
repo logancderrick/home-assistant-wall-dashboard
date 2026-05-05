@@ -116,10 +116,15 @@ export interface AppSettings {
   voiceSatelliteEntityId?: string;
   /** Optional pipeline ID override for voice satellite; undefined = use default pipeline. */
   voicePipelineId?: string;
-  /** Wake word sensitivity for "Hey Jarvis" detection (0.0-1.0, default 0.5). */
+  /** Wake word sensitivity for on-device detection (0.0–1.0, default 0.5). */
   wakeWordSensitivity?: number;
   /** Enable wake word detection (default true when entity ID is configured). */
   wakeWordEnabled?: boolean;
+  /**
+   * On-device wake keyword (same TFLite assets as jxlarrea/voice-satellite-card-integration).
+   * Default `hey_jarvis`.
+   */
+  voiceWakeWordModelId?: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -139,6 +144,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   voicePipelineId: "",
   wakeWordSensitivity: 0.5,
   wakeWordEnabled: true,
+  voiceWakeWordModelId: "hey_jarvis",
 };
 
 interface AppState {
@@ -259,6 +265,19 @@ function normalizeSettings(candidate: Partial<AppSettings> | null | undefined): 
   }
   if (typeof merged.wakeWordEnabled !== "boolean") {
     merged.wakeWordEnabled = true;
+  }
+  const allowedWake = new Set([
+    "ok_nabu",
+    "hey_jarvis",
+    "hey_mycroft",
+    "alexa",
+    "hey_home_assistant",
+    "hey_luna",
+    "okay_computer",
+    "stop",
+  ]);
+  if (typeof merged.voiceWakeWordModelId !== "string" || !allowedWake.has(merged.voiceWakeWordModelId)) {
+    merged.voiceWakeWordModelId = DEFAULT_SETTINGS.voiceWakeWordModelId;
   }
   return merged;
 }

@@ -1,125 +1,161 @@
 /**
- * Wake word detection using TensorFlow Lite.
- * Detects "Hey Jarvis" wake words from continuous audio stream.
+ * On-device wake word using the same TFLite models + inference stack as
+ * jxlarrea/voice-satellite-card-integration (vendored under ./upstream-wake).
  */
 
-import * as tf from '@tensorflow/tfjs';
-import { VOICE_SAMPLE_RATE } from './constants';
+export const VOICE_WAKE_WORD_MODEL_IDS = [
+  "ok_nabu",
+  "hey_jarvis",
+  "hey_mycroft",
+  "alexa",
+  "hey_home_assistant",
+  "hey_luna",
+  "okay_computer",
+  "stop",
+] as const;
+
+export type VoiceWakeWordModelId = (typeof VOICE_WAKE_WORD_MODEL_IDS)[number];
+
+export const VOICE_WAKE_WORD_MODEL_LABELS: Record<VoiceWakeWordModelId, string> = {
+  ok_nabu: "Okay Nabu",
+  hey_jarvis: "Hey Jarvis",
+  hey_mycroft: "Hey Mycroft",
+  alexa: "Alexa",
+  hey_home_assistant: "Hey Home Assistant",
+  hey_luna: "Hey Luna",
+  okay_computer: "Okay Computer",
+  stop: "Stop",
+};
+
+const CHUNK_SAMPLES = 1280;
 
 export interface WakeWordConfig {
-  sensitivity: number; // 0.0-1.0, higher = more sensitive (more false positives)
+  sensitivity: number;
   enabled: boolean;
 }
 
 export interface WakeWordDetector {
   detect: (pcm: Int16Array) => Promise<{ detected: boolean; confidence: number }>;
   setConfig: (config: Partial<WakeWordConfig>) => void;
+  /** Drop queued PCM and reset microWakeWord internal buffers (avoids phantom wake after a run). */
+  flushPending: () => void;
   cleanup: () => Promise<void>;
 }
 
+const noopLog = { log: () => {} };
+
+function sensitivityLabelFrom01(v: number): string {
+  if (v < 0.34) return "Slightly sensitive";
+  if (v > 0.66) return "Very sensitive";
+  return "Moderately sensitive";
+}
+
+function isVoiceWakeWordModelId(id: string): id is VoiceWakeWordModelId {
+  return (VOICE_WAKE_WORD_MODEL_IDS as readonly string[]).includes(id);
+}
+
+function setModelsBaseUrl(): void {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const base = (import.meta.env.BASE_URL || "/").replace(/\/+$/, "");
+  (globalThis as unknown as { __VS_MODELS_BASE?: string }).__VS_MODELS_BASE = `${origin}${base}/voice-models`;
+}
+
+export interface CreateWakeWordDetectorOptions {
+  modelId: VoiceWakeWordModelId;
+  sensitivity01: number;
+  onDetection?: (confidence: number) => void;
+}
+
 /**
- * Create a wake word detector for "Hey Jarvis".
- * Uses TFLite models: microWakeWord (feature extractor) + hey_google (classifier).
+ * Loads the selected keyword model (same assets as the Voice Satellite integration)
+ * and runs microWakeWord inference in the browser.
  */
 export async function createWakeWordDetector(
-  onDetection?: (confidence: number) => void
+  opts: CreateWakeWordDetectorOptions,
 ): Promise<WakeWordDetector> {
-  const config: WakeWordConfig = {
-    sensitivity: 0.5,
-    enabled: true,
+  setModelsBaseUrl();
+
+  const [{ loadTFLite, createIsolatedModelRunner, getMicroModelParams, releaseMicroModels }, modInf] =
+    await Promise.all([
+      import("./upstream-wake/micro-models.js"),
+      import("./upstream-wake/micro-inference.js"),
+    ]);
+
+  const { MicroWakeWordInference } = modInf as unknown as {
+    MicroWakeWordInference: {
+      create: (
+        configs: unknown[],
+        log: { log: (c: string, m: string) => void },
+        sensitivityLabel: string,
+        energyGate: boolean,
+      ) => Promise<{ processChunk: (s: Float32Array) => Promise<unknown>; reset: () => void; destroy: () => void }>;
+    };
   };
 
-  let featureExtractor: tf.GraphModel | null = null;
-  let wakeWordModel: tf.GraphModel | null = null;
-  let audioBuffer: number[] = [];
-  const FEATURE_SIZE = 1960; // 49 frames * 40 mel-freq bins
+  await loadTFLite();
+  const modelId = opts.modelId;
+  const runner = await createIsolatedModelRunner(null, modelId);
+  const p = getMicroModelParams(modelId);
+  const sensitivityLabel = sensitivityLabelFrom01(opts.sensitivity01);
 
-  const loadModels = async () => {
+  const inference = await MicroWakeWordInference.create(
+    [
+      {
+        runner,
+        name: modelId,
+        cutoff: p.cutoff,
+        slidingWindow: p.slidingWindow,
+        stepSize: p.stepSize,
+        inputScale: p.inputScale,
+        inputZeroPoint: p.inputZeroPoint,
+      },
+    ],
+    noopLog,
+    sensitivityLabel,
+    true,
+  );
+
+  let config: WakeWordConfig = { sensitivity: opts.sensitivity01, enabled: true };
+  let floatPending = new Float32Array(0);
+
+  function appendPcmAsFloat(pcm: Int16Array): void {
+    const add = new Float32Array(pcm.length);
+    const scale = 1 / 32768;
+    for (let i = 0; i < pcm.length; i++) {
+      add[i] = pcm[i] * scale;
+    }
+    const next = new Float32Array(floatPending.length + add.length);
+    next.set(floatPending);
+    next.set(add, floatPending.length);
+    floatPending = next;
+  }
+
+  const flushPending = () => {
+    floatPending = new Float32Array(0);
     try {
-      const baseUrl = `${import.meta.env.BASE_URL}voice-models/`;
-      featureExtractor = await (tf as any).loadGraphModel(`${baseUrl}microWakeWord.tflite`, {
-        requestInit: { cache: 'force-cache' },
-      });
-      wakeWordModel = await (tf as any).loadGraphModel(`${baseUrl}hey_google.tflite`, {
-        requestInit: { cache: 'force-cache' },
-      });
-    } catch (err) {
-      console.warn('Failed to load wake word models:', err);
-      throw err;
-    }
-  };
-
-  const extractFeatures = (pcmSamples: Int16Array): tf.Tensor | null => {
-    // Convert Int16 PCM to float32 [-1, 1]
-    const float32 = new Float32Array(pcmSamples.length);
-    for (let i = 0; i < pcmSamples.length; i++) {
-      float32[i] = pcmSamples[i] / 32768.0;
-    }
-
-    // Add to audio buffer
-    for (let i = 0; i < float32.length; i++) {
-      audioBuffer.push(float32[i]);
-    }
-
-    // Keep buffer at reasonable size (5 seconds at 16kHz = 80k samples)
-    if (audioBuffer.length > 80000) {
-      audioBuffer = audioBuffer.slice(audioBuffer.length - 80000);
-    }
-
-    // Need at least 1 second of audio for meaningful features
-    if (audioBuffer.length < VOICE_SAMPLE_RATE) {
-      return null;
-    }
-
-    try {
-      // Create mel-spectrogram features
-      const features = computeMelSpectrogram(new Float32Array(audioBuffer), VOICE_SAMPLE_RATE);
-      if (!features || features.length === 0) {
-        return null;
-      }
-
-      // Use the last FEATURE_SIZE features
-      const featureTensor = tf.tensor2d([features.slice(-FEATURE_SIZE)]);
-      return featureTensor;
-    } catch (err) {
-      console.warn('Feature extraction failed:', err);
-      return null;
+      inference.reset();
+    } catch {
+      /* ignore */
     }
   };
 
   const detect = async (pcm: Int16Array): Promise<{ detected: boolean; confidence: number }> => {
-    if (!config.enabled || !featureExtractor || !wakeWordModel) {
-      return { detected: false, confidence: 0 };
-    }
-
-    try {
-      const features = extractFeatures(pcm);
-      if (!features) {
-        return { detected: false, confidence: 0 };
+    if (!config.enabled) return { detected: false, confidence: 0 };
+    appendPcmAsFloat(pcm);
+    while (floatPending.length >= CHUNK_SAMPLES) {
+      const chunk = floatPending.slice(0, CHUNK_SAMPLES);
+      floatPending = floatPending.slice(CHUNK_SAMPLES);
+      const result = (await inference.processChunk(chunk)) as {
+        detected: boolean;
+        score?: number;
+      };
+      if (result.detected) {
+        const conf = typeof result.score === "number" ? result.score : 0;
+        opts.onDetection?.(conf);
+        return { detected: true, confidence: conf };
       }
-
-      // Run feature extraction (deprecated in newer TFLite, but needed for compatibility)
-      // For now, use features directly
-      const prediction = wakeWordModel.predict(features) as tf.Tensor;
-      const probs = await prediction.data();
-      const confidence = Math.max(...Array.from(probs));
-
-      features.dispose();
-      prediction.dispose();
-
-      // Adjust threshold based on sensitivity (0.5 = 0.5, 0.8 = 0.35, 0.3 = 0.65)
-      const threshold = 1.0 - config.sensitivity;
-      const detected = confidence > threshold;
-
-      if (detected && onDetection) {
-        onDetection(confidence);
-      }
-
-      return { detected, confidence };
-    } catch (err) {
-      console.warn('Wake word detection error:', err);
-      return { detected: false, confidence: 0 };
     }
+    return { detected: false, confidence: 0 };
   };
 
   const setConfig = (newConfig: Partial<WakeWordConfig>) => {
@@ -127,66 +163,20 @@ export async function createWakeWordDetector(
   };
 
   const cleanup = async () => {
-    if (featureExtractor) featureExtractor.dispose();
-    if (wakeWordModel) wakeWordModel.dispose();
-    audioBuffer = [];
+    try {
+      inference.destroy();
+    } catch {
+      // ignore
+    }
+    floatPending = new Float32Array(0);
+    await releaseMicroModels();
   };
 
-  // Load models on creation
-  await loadModels();
-
-  return { detect, setConfig, cleanup };
+  return { detect, setConfig, flushPending, cleanup };
 }
 
-/**
- * Compute mel-spectrogram from PCM samples.
- * Simplified version: extracts MFCC-like features for wake word detection.
- */
-function computeMelSpectrogram(pcm: Float32Array, sampleRate: number): number[] {
-  // Frame parameters
-  const frameSize = 512; // ~32ms at 16kHz
-  const hopSize = 160; // 10ms
-  const numMelBins = 40;
-
-  if (pcm.length < frameSize) {
-    return [];
-  }
-
-  const frames: number[][] = [];
-
-  // Compute power spectrum for each frame
-  for (let i = 0; i + frameSize <= pcm.length; i += hopSize) {
-    const frame = pcm.slice(i, i + frameSize);
-
-    // Apply Hann window
-    const windowed = new Float32Array(frameSize);
-    for (let j = 0; j < frameSize; j++) {
-      const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * j) / (frameSize - 1));
-      windowed[j] = frame[j] * w;
-    }
-
-    // FFT (simplified: just use power of first half)
-    const power = new Float32Array(frameSize / 2);
-    for (let j = 0; j < frameSize / 2; j++) {
-      power[j] = windowed[j] * windowed[j];
-    }
-
-    // Mel-frequency mapping (simplified)
-    const melBins = new Float32Array(numMelBins);
-    const freqBins = power.length;
-    for (let m = 0; m < numMelBins; m++) {
-      const start = Math.floor((m / numMelBins) * freqBins);
-      const end = Math.floor(((m + 1) / numMelBins) * freqBins);
-      let sum = 0;
-      for (let j = start; j < end && j < freqBins; j++) {
-        sum += power[j];
-      }
-      melBins[m] = Math.log(Math.max(sum, 1e-6));
-    }
-
-    frames.push(Array.from(melBins));
-  }
-
-  // Flatten frames into a single feature vector
-  return frames.flat();
+export function parseVoiceWakeWordModelId(raw: string | undefined | null): VoiceWakeWordModelId {
+  const id = String(raw ?? "").trim();
+  if (id && isVoiceWakeWordModelId(id)) return id;
+  return "hey_jarvis";
 }

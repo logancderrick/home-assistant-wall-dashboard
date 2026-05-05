@@ -23,6 +23,21 @@ const DEMO_HASS_STATES = [
     state: "idle",
     attributes: { friendly_name: "Living Room (demo)", entity_picture: null },
   },
+  {
+    entity_id: "calendar.demo_family",
+    state: "on",
+    attributes: { friendly_name: "Family (demo)" },
+  },
+  {
+    entity_id: "calendar.demo_work",
+    state: "on",
+    attributes: { friendly_name: "Work (demo)" },
+  },
+  {
+    entity_id: "assist_satellite.demo_wall_panel",
+    state: "idle",
+    attributes: { friendly_name: "Wall panel (demo)" },
+  },
 ] as unknown as HassEntity[];
 
 /** Use in place of `getStates(conn)` so demo mode can list sample entities without HA. */

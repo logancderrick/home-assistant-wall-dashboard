@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import SettingsSidebar, { type SettingsSectionId } from "../components/Settings/SettingsSidebar";
 import SettingsSection, { SettingRow } from "../components/Settings/SettingsSection";
@@ -23,6 +23,14 @@ import { useWeatherData } from "../hooks/useWeeklyWeather";
 import { useSkydarkDataContext } from "../contexts/SkydarkDataContext";
 import { REMOTE_CALENDAR_DEFAULT_COLORS } from "../components/Calendar/EventColorPattern";
 import { CameraIcon } from "../components/Layout/SidebarIcons";
+import HaEntitySelect from "../components/Settings/HaEntitySelect";
+import { fetchAssistPipelines, type AssistPipelineSummary } from "../lib/skyDarkApi";
+import { isSkydarkDemo } from "../lib/demoMode";
+import {
+  parseVoiceWakeWordModelId,
+  VOICE_WAKE_WORD_MODEL_IDS,
+  VOICE_WAKE_WORD_MODEL_LABELS,
+} from "../lib/voice/wakeWord";
 
 export default function SettingsView() {
   const {
@@ -40,13 +48,10 @@ export default function SettingsView() {
   const viewportSimulator = useViewportSimulator();
   const weather = useWeatherData();
   const skydark = useSkydarkDataContext();
+  const conn = skydark?.data?.connection ?? null;
   const pendingPinActionRef = useRef<(() => void) | null>(null);
-  const [remoteDraft, setRemoteDraft] = useState(() =>
-    (settings.remoteCalendarEntities ?? []).join("\n"),
-  );
-  useEffect(() => {
-    setRemoteDraft((settings.remoteCalendarEntities ?? []).join("\n"));
-  }, [settings.remoteCalendarEntities]);
+  const [remoteAddPickerKey, setRemoteAddPickerKey] = useState(0);
+  const [assistPipelines, setAssistPipelines] = useState<AssistPipelineSummary[]>([]);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("general");
   const [showDisableLockPrompt, setShowDisableLockPrompt] = useState(false);
   const [showSetPin, setShowSetPin] = useState(false);
@@ -140,6 +145,51 @@ export default function SettingsView() {
     }
     return false;
   };
+
+  const commitRemoteCalendarIds = useCallback(
+    (ids: string[]) => {
+      const prevColors = settings.remoteCalendarColors ?? {};
+      const prevLabels = settings.remoteCalendarLabels ?? {};
+      const nextColors: Record<string, string> = {};
+      const nextLabels: Record<string, string> = {};
+      ids.forEach((id, i) => {
+        const existing = prevColors[id]?.trim();
+        nextColors[id] =
+          existing && /^#[0-9A-Fa-f]{6}$/i.test(existing)
+            ? existing
+            : REMOTE_CALENDAR_DEFAULT_COLORS[i % REMOTE_CALENDAR_DEFAULT_COLORS.length];
+        const label = prevLabels[id]?.trim();
+        if (label) nextLabels[id] = label;
+      });
+      setSettings({
+        remoteCalendarEntities: ids,
+        remoteCalendarColors: nextColors,
+        remoteCalendarLabels: nextLabels,
+      });
+      void skydark?.refetchEvents();
+    },
+    [setSettings, settings.remoteCalendarColors, settings.remoteCalendarLabels, skydark],
+  );
+
+  useEffect(() => {
+    if (activeSection !== "voice") return;
+    if (isSkydarkDemo) {
+      setAssistPipelines([{ id: "demo_pipeline", name: "Demo pipeline" }]);
+      return;
+    }
+    const c = skydark?.data?.connection;
+    if (!c) {
+      setAssistPipelines([]);
+      return;
+    }
+    let cancelled = false;
+    void fetchAssistPipelines(c).then((p) => {
+      if (!cancelled) setAssistPipelines(p);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection, skydark?.data?.connection]);
 
   const requireUnlockToChangeSettings =
     settings.lockEnabled && isLocked && settings.lockedFeatures.changeSettings;
@@ -421,16 +471,13 @@ export default function SettingsView() {
               <label className="block text-sm font-medium text-skydark-text mb-1.5 mt-6">
                 Default Home Assistant calendar for new events (optional)
               </label>
-              <input
-                type="text"
-                className="input-skydark w-full max-w-lg font-mono text-sm"
-                placeholder="calendar.google_com_family"
+              <HaEntitySelect
+                connection={conn}
+                domain="calendar"
+                allowEmpty
+                emptyLabel="(none — pick when adding an event)"
                 value={settings.pushEventsToCalendarEntityId ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setSettings({ pushEventsToCalendarEntityId: v ? v : undefined });
-                }}
-                spellCheck={false}
+                onChange={(id) => setSettings({ pushEventsToCalendarEntityId: id ? id : undefined })}
                 aria-label="Home Assistant calendar entity to push new events to"
               />
               <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
@@ -448,35 +495,37 @@ export default function SettingsView() {
                 between them.
               </p>
               <label className="block text-sm font-medium text-skydark-text mb-1.5">Camera entity 1</label>
-              <input
-                type="text"
-                className="input-skydark w-full max-w-lg font-mono text-sm mb-4"
-                placeholder="e.g. camera.front_porch_high_resolution_channel"
-                value={settings.calendarPreviewCameras?.[0] ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  const second = settings.calendarPreviewCameras?.[1]?.trim() ?? "";
-                  const next = [v, second].filter(Boolean);
-                  setSettings({ calendarPreviewCameras: next });
-                }}
-                spellCheck={false}
-                aria-label="First calendar preview camera entity ID"
-              />
+              <div className="mb-4">
+                <HaEntitySelect
+                  connection={conn}
+                  domain="camera"
+                  allowEmpty
+                  emptyLabel="(none)"
+                  value={settings.calendarPreviewCameras?.[0] ?? ""}
+                  onChange={(id) => {
+                    const v = id.trim();
+                    const second = settings.calendarPreviewCameras?.[1]?.trim() ?? "";
+                    setSettings({ calendarPreviewCameras: [v, second].filter(Boolean) });
+                  }}
+                  aria-label="First calendar preview camera entity ID"
+                />
+              </div>
               <label className="block text-sm font-medium text-skydark-text mb-1.5">Camera entity 2 (optional)</label>
-              <input
-                type="text"
-                className="input-skydark w-full max-w-lg font-mono text-sm mb-4"
-                placeholder="e.g. camera.carport_high_resolution_channel"
-                value={settings.calendarPreviewCameras?.[1] ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  const first = settings.calendarPreviewCameras?.[0]?.trim() ?? "";
-                  const next = [first, v].filter(Boolean);
-                  setSettings({ calendarPreviewCameras: next });
-                }}
-                spellCheck={false}
-                aria-label="Second calendar preview camera entity ID"
-              />
+              <div className="mb-4">
+                <HaEntitySelect
+                  connection={conn}
+                  domain="camera"
+                  allowEmpty
+                  emptyLabel="(none)"
+                  value={settings.calendarPreviewCameras?.[1] ?? ""}
+                  onChange={(id) => {
+                    const v = id.trim();
+                    const first = settings.calendarPreviewCameras?.[0]?.trim() ?? "";
+                    setSettings({ calendarPreviewCameras: [first, v].filter(Boolean) });
+                  }}
+                  aria-label="Second calendar preview camera entity ID"
+                />
+              </div>
               <label className="block text-sm font-medium text-skydark-text mb-1.5">Rotate every (seconds)</label>
               <input
                 type="number"
@@ -498,43 +547,32 @@ export default function SettingsView() {
 
             <SettingsSection title="Remote calendars" icon={<CalendarSettingsIcon className="w-5 h-5 text-skydark-text-secondary" />}>
               <p className="text-sm text-skydark-text-secondary mb-3">
-                Add Home Assistant calendar entity IDs (one per line), for example from the Remote Calendar integration.
-                Events from these calendars are merged into SkyDark. Use the buttons on the calendar view to show or hide each source.
+                Pick Home Assistant <span className="font-mono text-skydark-text">calendar.*</span> entities to merge into SkyDark
+                (for example from the Remote Calendar integration). Use the buttons on the calendar view to show or hide each source.
               </p>
-              <label className="block text-sm font-medium text-skydark-text mb-1.5">Calendar entities</label>
-              <textarea
-                value={remoteDraft}
-                onChange={(e) => setRemoteDraft(e.target.value)}
-                onBlur={() => {
-                  const ids = remoteDraft
-                    .split(/[\n,]+/)
-                    .map((s) => s.trim())
-                    .filter((s) => s.startsWith("calendar."));
-                  const prevColors = settings.remoteCalendarColors ?? {};
-                  const prevLabels = settings.remoteCalendarLabels ?? {};
-                  const nextColors: Record<string, string> = {};
-                  const nextLabels: Record<string, string> = {};
-                  ids.forEach((id, i) => {
-                    const existing = prevColors[id]?.trim();
-                    nextColors[id] =
-                      existing && /^#[0-9A-Fa-f]{6}$/i.test(existing)
-                        ? existing
-                        : REMOTE_CALENDAR_DEFAULT_COLORS[i % REMOTE_CALENDAR_DEFAULT_COLORS.length];
-                    const label = prevLabels[id]?.trim();
-                    if (label) nextLabels[id] = label;
-                  });
-                  setSettings({
-                    remoteCalendarEntities: ids,
-                    remoteCalendarColors: nextColors,
-                    remoteCalendarLabels: nextLabels,
-                  });
-                  void skydark?.refetchEvents();
+              <label className="block text-sm font-medium text-skydark-text mb-1.5">Add calendar</label>
+              <HaEntitySelect
+                key={remoteAddPickerKey}
+                connection={conn}
+                domain="calendar"
+                allowEmpty
+                emptyLabel="Choose a calendar to add…"
+                excludeIds={settings.remoteCalendarEntities ?? []}
+                value=""
+                onChange={(id) => {
+                  if (!id) return;
+                  const cur = settings.remoteCalendarEntities ?? [];
+                  if (cur.includes(id)) return;
+                  commitRemoteCalendarIds([...cur, id]);
+                  setRemoteAddPickerKey((k) => k + 1);
                 }}
-                rows={5}
-                className="input-skydark w-full max-w-lg font-mono text-sm"
-                placeholder={"calendar.google_personal\ncalendar.family"}
-                spellCheck={false}
+                aria-label="Add merged Home Assistant calendar"
               />
+              {(settings.remoteCalendarEntities ?? []).length === 0 && (
+                <p className="text-sm text-amber-900 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2 mt-3 max-w-lg">
+                  No remote calendars yet. Add at least one above so Google / Apple / etc. events appear on the calendar.
+                </p>
+              )}
               {(settings.remoteCalendarEntities ?? []).length > 0 && (
                 <div className="mt-4 space-y-3 max-w-lg">
                   <p className="text-sm font-medium text-skydark-text">Display names and colors</p>
@@ -547,12 +585,23 @@ export default function SettingsView() {
                       key={eid}
                       className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3 border-b border-skydark-border pb-3 last:border-0 last:pb-0"
                     >
-                      <span
-                        className="text-xs text-skydark-text-secondary font-mono truncate flex-1 min-w-0 sm:max-w-[14rem]"
-                        title={eid}
-                      >
-                        {eid}
-                      </span>
+                      <div className="flex items-center gap-2 flex-1 min-w-0 sm:max-w-[16rem]">
+                        <span
+                          className="text-xs text-skydark-text-secondary font-mono truncate min-w-0"
+                          title={eid}
+                        >
+                          {eid}
+                        </span>
+                        <button
+                          type="button"
+                          className="text-xs font-medium text-red-600 hover:underline shrink-0"
+                          onClick={() =>
+                            commitRemoteCalendarIds((settings.remoteCalendarEntities ?? []).filter((x) => x !== eid))
+                          }
+                        >
+                          Remove
+                        </button>
+                      </div>
                       <input
                         type="text"
                         className="input-skydark flex-1 min-w-[8rem] max-w-md text-sm"
@@ -696,20 +745,41 @@ export default function SettingsView() {
             <h2 className="text-xl font-semibold text-skydark-text mb-6">Voice Control</h2>
             <SettingsSection title="Voice Satellite" icon={<VoiceIcon className="w-5 h-5 text-skydark-text-secondary" />}>
               <p className="text-sm text-skydark-text-secondary mb-4">
-                Connect this panel to a Voice Satellite entity for hands-free "Hey Jarvis" voice control.
-                The entity must be configured with the <span className="font-mono">voice_satellite</span> custom component.
+                Connect this panel to a Voice Satellite entity for hands-free or push-to-talk Assist. Uses the same
+                <span className="font-mono"> voice_satellite/run_pipeline</span> WebSocket contract as the official
+                browser satellite (including <span className="font-mono">wake_word_phrase</span> for Home Assistant
+                duplicate wake suppression).
               </p>
+              <div className="py-3">
+                <label className="flex items-start gap-3 cursor-pointer max-w-lg">
+                  <input
+                    type="checkbox"
+                    className="mt-1 rounded border-skydark-border"
+                    checked={settings.wakeWordEnabled !== false}
+                    onChange={(e) => setSettings({ wakeWordEnabled: e.target.checked })}
+                  />
+                  <span>
+                    <span className="block text-sm font-medium text-skydark-text">Listen for wake word hands-free</span>
+                    <span className="block text-xs text-skydark-text-secondary mt-1">
+                      Turn off if the mic keeps re-triggering (e.g. TTS echo). The mic button still starts Assist when off.
+                    </span>
+                  </span>
+                </label>
+              </div>
               <div className="py-3">
                 <label className="block text-sm font-medium text-skydark-text mb-1.5">
                   Assist Satellite entity ID
                 </label>
-                <input
-                  type="text"
-                  className="input-skydark w-full max-w-lg font-mono text-sm"
-                  placeholder="assist_satellite.wall_panel"
+                <HaEntitySelect
+                  connection={conn}
+                  domain="assist_satellite"
+                  allowEmpty
+                  emptyLabel="(disabled — no voice satellite)"
                   value={settings.voiceSatelliteEntityId ?? ""}
-                  onChange={(e) => setSettings({ voiceSatelliteEntityId: e.target.value.trim() || "" })}
-                  spellCheck={false}
+                  onChange={(id) =>
+                    setSettings({ voiceSatelliteEntityId: id.trim() ? id.trim() : undefined })
+                  }
+                  aria-label="Assist Satellite entity"
                 />
                 <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
                   Leave empty to disable voice control. The entity_id must match the one configured in the
@@ -717,20 +787,71 @@ export default function SettingsView() {
                 </p>
               </div>
               <div className="py-3">
+                <label className="block text-sm font-medium text-skydark-text mb-1.5">On-device wake word</label>
+                <select
+                  className="input-skydark w-full max-w-lg text-sm"
+                  value={parseVoiceWakeWordModelId(settings.voiceWakeWordModelId)}
+                  onChange={(e) => setSettings({ voiceWakeWordModelId: e.target.value })}
+                  aria-label="Wake word model"
+                >
+                  {VOICE_WAKE_WORD_MODEL_IDS.map((id) => (
+                    <option key={id} value={id}>
+                      {VOICE_WAKE_WORD_MODEL_LABELS[id]}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
+                  Matches the integration’s bundled TFLite classifiers. The mic button hint uses this phrase (e.g. Hey Jarvis).
+                </p>
+              </div>
+              <div className="py-3">
                 <label className="block text-sm font-medium text-skydark-text mb-1.5">
                   Pipeline ID (optional)
                 </label>
-                <input
-                  type="text"
-                  className="input-skydark w-full max-w-lg font-mono text-sm"
-                  placeholder="Leave empty for default pipeline"
-                  value={settings.voicePipelineId ?? ""}
-                  onChange={(e) => setSettings({ voicePipelineId: e.target.value.trim() || "" })}
-                  spellCheck={false}
-                />
-                <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
-                  Specify a custom pipeline ID if you have multiple pipelines configured.
-                </p>
+                {assistPipelines.length > 0 ? (
+                  <>
+                    <select
+                      className="input-skydark w-full max-w-lg text-sm"
+                      value={settings.voicePipelineId ?? ""}
+                      onChange={(e) =>
+                        setSettings({ voicePipelineId: e.target.value.trim() || undefined })
+                      }
+                      aria-label="Assist pipeline"
+                    >
+                      <option value="">Default pipeline</option>
+                      {settings.voicePipelineId &&
+                      !assistPipelines.some((p) => p.id === settings.voicePipelineId) ? (
+                        <option value={settings.voicePipelineId}>
+                          Current: {settings.voicePipelineId}
+                        </option>
+                      ) : null}
+                      {assistPipelines.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} ({p.id})
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
+                      Loaded from Home Assistant. Choose Default unless you need a specific Assist pipeline.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      className="input-skydark w-full max-w-lg font-mono text-sm"
+                      placeholder="Leave empty for default pipeline"
+                      value={settings.voicePipelineId ?? ""}
+                      onChange={(e) => setSettings({ voicePipelineId: e.target.value.trim() || undefined })}
+                      spellCheck={false}
+                      aria-label="Assist pipeline ID (manual)"
+                    />
+                    <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
+                      Pipelines could not be listed (connect to Home Assistant or check Assist). You can still paste a pipeline ID
+                      from <span className="font-mono">Settings → Voice assistants</span> in Home Assistant.
+                    </p>
+                  </>
+                )}
               </div>
               <div className="py-3">
                 <label className="block text-sm font-medium text-skydark-text mb-3">

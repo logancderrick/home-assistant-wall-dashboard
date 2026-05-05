@@ -3,9 +3,38 @@
  * Handles `voice_satellite/run_pipeline` subscription and binary PCM frame sending.
  */
 
-import type { Connection } from 'home-assistant-js-websocket';
-import type { RunPipelineMsg, PipelineRunResult, PipelineEvent } from './wsTypes';
-import { getRawSocket } from './wsTypes';
+import type { Connection } from "home-assistant-js-websocket";
+import type { RunPipelineMsg, PipelineEvent } from "./wsTypes";
+import { getRawSocket, toHaMessage } from "./wsTypes";
+import { formatVoiceUserMessage } from "./formatVoiceUserMessage";
+
+function extractPipelineErrorCode(e: Record<string, unknown>): string {
+  const data = e.data as Record<string, unknown> | undefined;
+  if (data && typeof data.code === 'string' && data.code.length > 0) return data.code;
+  if (typeof e.code === 'string' && e.code.length > 0) return e.code;
+  return 'unknown';
+}
+
+/** HA `assist_pipeline.error.DuplicateWakeUpDetectedError` — benign; ignore UI error. */
+export function isDuplicateWakeUpPipelineError(code: string, message: string): boolean {
+  const blob = `${code} ${message}`.toLowerCase();
+  return (
+    code === 'duplicate_wake_up_detected' ||
+    blob.includes('duplicate_wake_up_detected') ||
+    blob.includes('duplicate wake-up')
+  );
+}
+
+function pipelineErrorText(e: Record<string, unknown>, pipelineEvent: PipelineEvent): string {
+  const fromField = formatVoiceUserMessage(pipelineEvent.error);
+  if (fromField !== "Unknown error") return fromField;
+  const data = pipelineEvent.data as Record<string, unknown> | undefined;
+  if (data) {
+    const nested = formatVoiceUserMessage(data.message ?? data.error ?? data.code);
+    if (nested !== "Unknown error") return nested;
+  }
+  return formatVoiceUserMessage(e.message ?? e.error);
+}
 
 export interface PipelineEventCallbacks {
   onSttEnd: (transcript: string) => void;
@@ -25,6 +54,14 @@ export interface PipelineCommsHandle {
   sendAudioDone: (conn: Connection, handlerId: number) => void;
 }
 
+function normalizeBinaryHandlerId(handlerId: number): number {
+  const n = Math.trunc(handlerId);
+  if (!Number.isFinite(n) || n < 0 || n > 255) {
+    throw new Error("Invalid binary handler id from Home Assistant");
+  }
+  return n;
+}
+
 /**
  * Creates a pipeline comms handle for sending audio to HA's assist pipeline.
  */
@@ -34,48 +71,85 @@ export function createPipelineComms(): PipelineCommsHandle {
     msg: RunPipelineMsg,
     callbacks: PipelineEventCallbacks
   ): Promise<{ handlerId: number }> => {
+    let handlerResolved = false;
+    let settled = false;
+
     return new Promise((resolve, reject) => {
-      try {
-        // Subscribe to the pipeline run with event handling
-        conn.subscribeMessage(
+      const settleReject = (err: Error) => {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      };
+
+      void conn
+        .subscribeMessage(
           (event: unknown) => {
             const e = event as Record<string, unknown>;
             const type = e.type as string;
 
-            // Parse pipeline event
-            if (type === 'run-start') {
+            // voice_satellite (and assist_pipeline) send handler_id only in this event,
+            // not in the command result. A second sendMessagePromise was removing the
+            // subscription and breaking the stream ("unknown subscription" in the client).
+            if (type === "init") {
+              try {
+                const hid = normalizeBinaryHandlerId(Number(e.handler_id));
+                if (!handlerResolved) {
+                  handlerResolved = true;
+                  settled = true;
+                  resolve({ handlerId: hid });
+                }
+              } catch (subErr) {
+                settleReject(
+                  subErr instanceof Error
+                    ? subErr
+                    : new Error(String(subErr)),
+                );
+              }
+              return;
+            }
+
+            if (type === "displaced") {
+              settleReject(
+                new Error(
+                  "Voice session was replaced by another browser or tab using this satellite entity.",
+                ),
+              );
+              return;
+            }
+
+            if (type === "run-start") {
               // Pipeline started
-            } else if (type === 'stt-end') {
-              const pipelineEvent = e as PipelineEvent;
-              const transcript =
-                pipelineEvent.data?.stt_output?.text ?? '';
+            } else if (type === "stt-end") {
+              const pipelineEvent = e as unknown as PipelineEvent;
+              const transcript = pipelineEvent.data?.stt_output?.text ?? "";
               callbacks.onSttEnd(transcript);
-            } else if (type === 'tts-start') {
-              const pipelineEvent = e as PipelineEvent;
-              const ttsOutput = pipelineEvent.data?.tts_output?.text ?? '';
+            } else if (type === "tts-start") {
+              const pipelineEvent = e as unknown as PipelineEvent;
+              const ttsOutput = pipelineEvent.data?.tts_output?.text ?? "";
               callbacks.onTtsStart(ttsOutput);
-            } else if (type === 'tts-end') {
+            } else if (type === "tts-end") {
               callbacks.onTtsEnd();
-            } else if (type === 'run-end') {
+            } else if (type === "run-end") {
               callbacks.onRunEnd();
-            } else if (type === 'error') {
-              const pipelineEvent = e as PipelineEvent;
-              callbacks.onError('pipeline_error', pipelineEvent.error ?? 'Unknown error');
+            } else if (type === "error") {
+              const pipelineEvent = e as unknown as PipelineEvent;
+              const code = extractPipelineErrorCode(e);
+              const msg = pipelineErrorText(e, pipelineEvent);
+              if (!handlerResolved) {
+                settleReject(new Error(`${code}: ${msg}`));
+              } else {
+                callbacks.onError(code, msg);
+              }
             }
           },
-          msg
-        ).then((unsubscribe) => {
-          // Query the response to get the handler_id
-          conn.sendMessagePromise(msg as Record<string, unknown>).then((result) => {
-            const pipelineResult = result as PipelineRunResult;
-            resolve({ handlerId: pipelineResult.handler_id });
-          });
-        }).catch((err) => {
-          reject(err);
+          toHaMessage(msg)
+        )
+        .catch((err) => {
+          settleReject(
+            err instanceof Error ? err : new Error(formatVoiceUserMessage(err)),
+          );
         });
-      } catch (err) {
-        reject(err);
-      }
     });
   };
 
@@ -86,14 +160,13 @@ export function createPipelineComms(): PipelineCommsHandle {
         return;
       }
 
-      // HA assist pipeline protocol: 4-byte little-endian uint32 handler_id + PCM bytes
-      const buf = new ArrayBuffer(4 + pcm.byteLength);
-      const view = new DataView(buf);
-      view.setUint32(0, handlerId, true); // handler_id as little-endian uint32
-
-      // Copy PCM data after the handler_id
+      // HA WebSocket binary: first byte = registered binary handler id, remainder = PCM (int16le mono).
+      // See homeassistant/components/websocket_api/http.py (command-phase BINARY).
+      const hi = normalizeBinaryHandlerId(handlerId);
+      const buf = new ArrayBuffer(1 + pcm.byteLength);
       const uint8View = new Uint8Array(buf);
-      uint8View.set(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength), 4);
+      uint8View[0] = hi;
+      uint8View.set(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength), 1);
 
       socket.send(buf);
     } catch (err) {
@@ -108,12 +181,9 @@ export function createPipelineComms(): PipelineCommsHandle {
         return;
       }
 
-      // Send termination frame: just the handler_id with zero bytes
-      const buf = new ArrayBuffer(4);
-      const view = new DataView(buf);
-      view.setUint32(0, handlerId, true);
-
-      socket.send(buf);
+      const hi = normalizeBinaryHandlerId(handlerId);
+      // Empty payload after handler byte = stop stream (voice_satellite audio_queue).
+      socket.send(new Uint8Array([hi]));
     } catch (err) {
       // Silently ignore send errors
     }

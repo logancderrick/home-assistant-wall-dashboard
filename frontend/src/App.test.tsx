@@ -5,6 +5,7 @@ import { routerFutureFlags } from "./lib/routerFutureFlags";
 import { AppProvider } from "./contexts/AppContext";
 import { SkydarkDataContext } from "./contexts/SkydarkDataContext";
 import { ViewportSimulatorProvider } from "./contexts/ViewportSimulatorContext";
+import { VoiceProvider } from "./contexts/VoiceContext";
 import AppBootstrapGate from "./components/AppBootstrapGate";
 import { buildDemoSkydarkState } from "./dev/demoSkydarkData";
 import App from "./App";
@@ -45,9 +46,11 @@ function TestWrapper({ children }: { children: React.ReactNode }) {
     <MemoryRouter future={routerFutureFlags} initialEntries={["/calendar"]}>
       <SkydarkDataContext.Provider value={demoSkydarkValue}>
         <AppProvider>
-          <AppBootstrapGate>
-            <ViewportSimulatorProvider>{children}</ViewportSimulatorProvider>
-          </AppBootstrapGate>
+          <VoiceProvider>
+            <AppBootstrapGate>
+              <ViewportSimulatorProvider>{children}</ViewportSimulatorProvider>
+            </AppBootstrapGate>
+          </VoiceProvider>
         </AppProvider>
       </SkydarkDataContext.Provider>
     </MemoryRouter>

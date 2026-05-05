@@ -1,9 +1,11 @@
 /**
  * Microphone capture via Web Audio API and AudioWorklet.
- * Captures 16-bit PCM audio at 16kHz sample rate.
+ * Captures microphone audio, resamples to {@link VOICE_SAMPLE_RATE} when the browser uses
+ * another AudioContext rate (common: 48 kHz), then delivers 16-bit mono PCM.
  */
 
 import { VOICE_SAMPLE_RATE } from './constants';
+import { resampleFloat32Linear } from './resample';
 
 export interface AudioCaptureOptions {
   onChunk: (pcm: Int16Array) => void;
@@ -13,11 +15,14 @@ export interface AudioCaptureOptions {
 export interface AudioCaptureHandle {
   start: () => Promise<void>;
   stop: () => void;
+  /** Sample rate of PCM passed to `onChunk` (always {@link VOICE_SAMPLE_RATE} after resampling). */
+  getSampleRate: () => number | null;
 }
 
 /**
  * Creates an audio capture handle that streams PCM samples via a callback.
- * Call start() to request microphone access, then onChunk fires for each 512-sample buffer.
+ * Call start() to request microphone access, then onChunk fires for each worklet buffer
+ * (resampled to 16 kHz so length may vary by device).
  */
 export function createAudioCapture(opts: AudioCaptureOptions): AudioCaptureHandle {
   let audioCtx: AudioContext | null = null;
@@ -44,13 +49,24 @@ export function createAudioCapture(opts: AudioCaptureOptions): AudioCaptureHandl
     }
   };
 
+  const getSampleRate = (): number | null => {
+    if (!audioCtx || audioCtx.state === 'closed') return null;
+    return VOICE_SAMPLE_RATE;
+  };
+
   const start = async () => {
     try {
       // Request microphone access
       stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
 
-      // Create AudioContext at 16kHz
+      // Create AudioContext (browser may pick 44.1k / 48k even when 16k is requested)
       audioCtx = new AudioContext({ sampleRate: VOICE_SAMPLE_RATE });
+      const nativeRate = audioCtx.sampleRate;
+      if (Math.abs(nativeRate - VOICE_SAMPLE_RATE) > 1) {
+        console.warn(
+          `[SkyDark voice] Microphone AudioContext is ${nativeRate} Hz; audio is resampled to ${VOICE_SAMPLE_RATE} Hz for wake word + Home Assistant.`,
+        );
+      }
 
       // Load the AudioWorklet processor
       const workletUrl = `${import.meta.env.BASE_URL}voice-worklet-processor.js`;
@@ -64,7 +80,10 @@ export function createAudioCapture(opts: AudioCaptureOptions): AudioCaptureHandl
 
       // Handle samples from the worklet
       workletNode.port.onmessage = (e: MessageEvent<Float32Array>) => {
-        const float32 = e.data;
+        let float32 = e.data;
+        if (Math.abs(nativeRate - VOICE_SAMPLE_RATE) > 1) {
+          float32 = resampleFloat32Linear(float32, nativeRate, VOICE_SAMPLE_RATE);
+        }
 
         // Convert Float32 (-1.0 to 1.0) to Int16 (-32768 to 32767)
         const int16 = new Int16Array(float32.length);
@@ -91,5 +110,5 @@ export function createAudioCapture(opts: AudioCaptureOptions): AudioCaptureHandl
     }
   };
 
-  return { start, stop };
+  return { start, stop, getSampleRate };
 }

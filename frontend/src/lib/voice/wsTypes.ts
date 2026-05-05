@@ -2,7 +2,12 @@
  * TypeScript shapes for voice_satellite WebSocket messages and events.
  */
 
-import type { Connection } from 'home-assistant-js-websocket';
+import type { Connection, MessageBase } from "home-assistant-js-websocket";
+
+/** Cast custom commands to HA WebSocket `MessageBase` for `sendMessagePromise` / `subscribeMessage`. */
+export function toHaMessage<T extends { type: string }>(msg: T): MessageBase {
+  return msg as unknown as MessageBase;
+}
 
 // ============================================================================
 // Outgoing WS messages from browser to HA
@@ -11,11 +16,18 @@ import type { Connection } from 'home-assistant-js-websocket';
 export interface RunPipelineMsg {
   type: 'voice_satellite/run_pipeline';
   entity_id: string;
+  /** Required by voice_satellite; must match streamed PCM (see `VOICE_SAMPLE_RATE`). */
+  sample_rate: number;
   pipeline_id?: string;
   conversation_id?: string;
   language?: string;
   start_stage: 'stt' | 'wake_word';
   end_stage: 'tts' | 'intent';
+  /**
+   * Human phrase for the active on-device wake model (e.g. "Hey Jarvis"). Required for HA core
+   * `DATA_LAST_WAKE_UP` dedup when `start_stage` is `stt` (see voice_satellite DESIGN-INTEGRATION).
+   */
+  wake_word_phrase?: string;
 }
 
 export interface UpdateStateMsg {
@@ -79,8 +91,11 @@ export interface PipelineEvent {
     stt_output?: { text: string };
     tts_output?: { text: string; media_id?: string };
     intent_output?: { response?: { speech?: string } };
+    message?: string;
+    code?: string;
   };
-  error?: string;
+  /** HA often sends a structured object, not a plain string. */
+  error?: unknown;
 }
 
 // ============================================================================

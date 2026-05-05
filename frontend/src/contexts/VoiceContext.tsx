@@ -4,41 +4,52 @@
  */
 
 import {
-  createContext,
-  useContext,
   useReducer,
   useEffect,
   useRef,
   useCallback,
   useState,
+  useContext,
   type ReactNode,
 } from 'react';
-import type { Connection } from 'home-assistant-js-websocket';
 import { useAppContext } from './AppContext';
 import { useSkydarkDataContext } from './SkydarkDataContext';
-import { VoiceState, type VoiceStateValue } from '../lib/voice/constants';
+import {
+  VoiceState,
+  VOICE_SAMPLE_RATE,
+  VOICE_UTTERANCE_SILENCE_MS,
+  VOICE_UTTERANCE_SPEECH_RMS,
+  VOICE_WAKE_PULSE_MS,
+  VOICE_HAD_SPEECH_ARM_DELAY_MS,
+  VOICE_MIN_LISTEN_BEFORE_AUTO_END_MS,
+  VOICE_MIN_LOUD_MS_FOR_AUTO_END_MS,
+  VOICE_MAX_LISTEN_STREAM_MS,
+  VOICE_WAKE_BLOCK_AFTER_TAP_MS,
+  VOICE_WAKE_BLOCK_AFTER_WAKE_MS,
+  VOICE_WAKE_POST_RUN_QUIET_MS,
+  VOICE_WAKE_SILENCE_RMS,
+  type VoiceStateValue,
+} from '../lib/voice/constants';
+import { formatVoiceUserMessage } from '../lib/voice/formatVoiceUserMessage';
 import { createAudioCapture } from '../lib/voice/audioCapture';
-import { createPipelineComms } from '../lib/voice/pipelineComms';
+import { createPipelineComms, isDuplicateWakeUpPipelineError } from '../lib/voice/pipelineComms';
 import { createTtsPlayer } from '../lib/voice/ttsPlayer';
-import { createWakeWordDetector, type WakeWordDetector } from '../lib/voice/wakeWord';
-import type { AnnounceFinishedMsg, SubscribeEventsMsg, UpdateStateMsg } from '../lib/voice/wsTypes';
+import {
+  createWakeWordDetector,
+  parseVoiceWakeWordModelId,
+  VOICE_WAKE_WORD_MODEL_LABELS,
+  type WakeWordDetector,
+} from '../lib/voice/wakeWord';
+import { toHaMessage, type AnnounceFinishedMsg, type SubscribeEventsMsg, type UpdateStateMsg } from '../lib/voice/wsTypes';
 import { isSkydarkDemo } from '../lib/demoMode';
+import { pcmRmsNormalized } from '../lib/voice/pcmLevel';
+import { playWakeEarcon } from '../lib/voice/wakeEarcon';
+import { VoiceContext, type VoiceContextValue } from './voiceContextShared';
 
-export interface VoiceContextValue {
-  voiceState: VoiceStateValue;
-  transcript: string;
-  error: string | null;
-  isEnabled: boolean;
-  isListeningForWakeWord: boolean;
-  wakeWordDetected: boolean;
-  wakeWordSensitivity: number;
-  setWakeWordSensitivity: (value: number) => void;
-  startListening: () => Promise<void>;
-  stopListening: () => void;
-  dismiss: () => void;
-}
+export type { VoiceContextValue };
 
-const VoiceContext = createContext<VoiceContextValue | null>(null);
+/** No active voice_satellite binary handler — do not use 0 (HA may assign handler id 0). */
+const NO_PIPELINE_HANDLER = -1;
 
 export function useVoiceContext(): VoiceContextValue {
   const ctx = useContext(VoiceContext);
@@ -59,7 +70,7 @@ type VoiceAction =
   | { type: 'PROCESSING' }
   | { type: 'RESPONDING'; transcript: string }
   | { type: 'DONE' }
-  | { type: 'ERROR'; message: string }
+  | { type: 'ERROR'; message: unknown }
   | { type: 'DISMISS' };
 
 interface VoiceState {
@@ -125,7 +136,7 @@ function voiceReducer(state: VoiceState, action: VoiceAction): VoiceState {
       return {
         ...state,
         state: VoiceState.ERROR,
-        error: action.message,
+        error: formatVoiceUserMessage(action.message),
         isListeningForWakeWord: true,
       };
     case 'DISMISS':
@@ -150,78 +161,230 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   const skydark = useSkydarkDataContext();
   const [voiceState, dispatch] = useReducer(voiceReducer, initialVoiceState);
   const [wakeWordSensitivity, setWakeWordSensitivityState] = useState(0.5);
+  const [wakePulse, setWakePulse] = useState(false);
 
   const conn = skydark?.data?.connection ?? null;
   const entityId = app.settings.voiceSatelliteEntityId ?? '';
   const pipelineId = app.settings.voicePipelineId ?? '';
   const isEnabled = entityId.trim().length > 0 && conn !== null;
+  const wakeModelId = parseVoiceWakeWordModelId(app.settings.voiceWakeWordModelId);
+  const wakePhrase = VOICE_WAKE_WORD_MODEL_LABELS[wakeModelId];
+  const wakeListeningEnabled = app.settings.wakeWordEnabled !== false;
+
+  const voiceStateRef = useRef(voiceState.state);
+  voiceStateRef.current = voiceState.state;
+
+  const wakeListeningEnabledRef = useRef(wakeListeningEnabled);
+  wakeListeningEnabledRef.current = wakeListeningEnabled;
+
+  const pcmChunkHandlerRef = useRef<(pcm: Int16Array) => void | Promise<void>>(() => {});
+  const startListeningRef = useRef<(initiator?: 'wake' | 'tap') => Promise<void>>(async () => {});
+  /** How the current/last pipeline was started — drives post-run wake block length. */
+  const lastPipelineInitiatorRef = useRef<'wake' | 'tap'>('tap');
 
   // Refs for managers
-  const currentHandlerIdRef = useRef(0);
+  const currentHandlerIdRef = useRef(NO_PIPELINE_HANDLER);
   const wakeWordDetectorRef = useRef<WakeWordDetector | null>(null);
   const isDetectingRef = useRef(false);
+  const wakePulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const utteranceRef = useRef({
+    hadSpeech: false,
+    lastLoudAt: 0,
+    loudMs: 0,
+    endSent: false,
+  });
+  /** performance.now() when LISTENING began for this pipeline run; drives client VAD gating. */
+  const listeningStartedAtRef = useRef(0);
+  /** Blocks overlapping voice_satellite runs (duplicate startListening / wake bounce). */
+  const pipelineSessionActiveRef = useRef(false);
+  /** Earliest performance.now() when wake may run after a pipeline ends. */
+  const wakeArmNotBeforeRef = useRef(0);
+  /** After a run, stay off until the mic has been quiet long enough (see VOICE_WAKE_POST_RUN_QUIET_MS). */
+  const suppressWakeUntilQuietRef = useRef(false);
+  const wakeQuietStreakMsRef = useRef(0);
+  /**
+   * microWakeWord mutates internal buffers in `detect()`; audio `onChunk` does not await the
+   * handler, so overlapping `detect()` calls corrupt state and can double-fire wake → earcon loop.
+   */
+  const wakeDetectChainRef = useRef<Promise<void>>(Promise.resolve());
+
+  const resetUtteranceTracking = useCallback(() => {
+    utteranceRef.current = { hadSpeech: false, lastLoudAt: 0, loudMs: 0, endSent: false };
+    listeningStartedAtRef.current = 0;
+  }, []);
+
+  const armWakeAfterPipelineEnd = () => {
+    suppressWakeUntilQuietRef.current = true;
+    wakeQuietStreakMsRef.current = 0;
+    const blockMs =
+      lastPipelineInitiatorRef.current === 'wake'
+        ? VOICE_WAKE_BLOCK_AFTER_WAKE_MS
+        : VOICE_WAKE_BLOCK_AFTER_TAP_MS;
+    wakeArmNotBeforeRef.current = performance.now() + blockMs;
+    wakeWordDetectorRef.current?.flushPending();
+  };
   const handlersRef = useRef({
     audio: createAudioCapture({
-      onChunk: () => {}, // will be set below
+      onChunk: (pcm) => {
+        void pcmChunkHandlerRef.current(pcm);
+      },
       onError: (err) => {
-        dispatch({ type: 'ERROR', message: err.message });
+        dispatch({ type: 'ERROR', message: err.message || err });
       },
     }),
     pipeline: createPipelineComms(),
     tts: createTtsPlayer(),
   });
 
-  // Initialize wake word detector once
+  // Initialize wake word detector once (skipped when hands-free wake is disabled in settings)
   useEffect(() => {
-    if (isSkydarkDemo || !isEnabled) return;
+    if (isSkydarkDemo || !isEnabled || !wakeListeningEnabled) {
+      if (wakeWordDetectorRef.current) {
+        void wakeWordDetectorRef.current.cleanup();
+        wakeWordDetectorRef.current = null;
+      }
+      return;
+    }
 
     const initWakeWordDetector = async () => {
       try {
-        wakeWordDetectorRef.current = await createWakeWordDetector((confidence) => {
-          if (confidence > 0.5) {
-            dispatch({ type: 'WAKE_WORD_DETECTED' });
-          }
+        wakeWordDetectorRef.current = await createWakeWordDetector({
+          modelId: wakeModelId,
+          sensitivity01: wakeWordSensitivity,
         });
         wakeWordDetectorRef.current.setConfig({ sensitivity: wakeWordSensitivity });
       } catch (err) {
-        console.warn('Failed to initialize wake word detector:', err);
+        console.error(
+          '[SkyDark voice] Wake word models failed to load — tap-to-talk may still work, wake word will not:',
+          err,
+        );
       }
     };
 
     void initWakeWordDetector();
 
     return () => {
+      if (wakePulseTimeoutRef.current) {
+        clearTimeout(wakePulseTimeoutRef.current);
+        wakePulseTimeoutRef.current = null;
+      }
+      setWakePulse(false);
       wakeWordDetectorRef.current?.cleanup();
       wakeWordDetectorRef.current = null;
     };
-  }, [isEnabled, wakeWordSensitivity]);
+  }, [isEnabled, wakeWordSensitivity, wakeModelId, wakeListeningEnabled]);
 
   // Start always-on audio capture for wake word detection
   useEffect(() => {
     if (!isEnabled || isSkydarkDemo) return;
+    const c = conn;
+    if (!c) return;
 
     const startWakeWordListening = async () => {
       try {
         const { audio } = handlersRef.current;
-        const detector = wakeWordDetectorRef.current;
 
-        // Set up audio chunk handler for wake word detection
-        audio.onChunk = async (pcm: Int16Array) => {
-          if (detector && isDetectingRef.current) {
-            const { detected } = await detector.detect(pcm);
-            if (detected && voiceState.state === VoiceState.IDLE) {
-              // Trigger pipeline start
-              void startListening();
+        pcmChunkHandlerRef.current = async (pcm: Int16Array) => {
+          const chunkMs = (pcm.length / VOICE_SAMPLE_RATE) * 1000;
+          const level = pcmRmsNormalized(pcm);
+          if (level < VOICE_WAKE_SILENCE_RMS) {
+            wakeQuietStreakMsRef.current += chunkMs;
+          } else {
+            wakeQuietStreakMsRef.current = 0;
+          }
+          if (
+            suppressWakeUntilQuietRef.current &&
+            wakeQuietStreakMsRef.current >= VOICE_WAKE_POST_RUN_QUIET_MS &&
+            performance.now() >= wakeArmNotBeforeRef.current
+          ) {
+            suppressWakeUntilQuietRef.current = false;
+            wakeWordDetectorRef.current?.flushPending();
+          }
+
+          if (
+            wakeWordDetectorRef.current &&
+            isDetectingRef.current &&
+            wakeListeningEnabledRef.current
+          ) {
+            if (
+              performance.now() >= wakeArmNotBeforeRef.current &&
+              !suppressWakeUntilQuietRef.current
+            ) {
+              wakeDetectChainRef.current = wakeDetectChainRef.current
+                .then(async () => {
+                  const detector = wakeWordDetectorRef.current;
+                  if (!detector || !isDetectingRef.current) return;
+                  if (performance.now() < wakeArmNotBeforeRef.current) return;
+                  if (suppressWakeUntilQuietRef.current) return;
+                  if (voiceStateRef.current !== VoiceState.IDLE) return;
+                  const { detected } = await detector.detect(pcm);
+                  if (!detected) return;
+                  if (performance.now() < wakeArmNotBeforeRef.current) return;
+                  if (suppressWakeUntilQuietRef.current) return;
+                  if (voiceStateRef.current !== VoiceState.IDLE || !isDetectingRef.current) return;
+
+                  dispatch({ type: 'WAKE_WORD_DETECTED' });
+                  playWakeEarcon();
+                  if (wakePulseTimeoutRef.current) {
+                    clearTimeout(wakePulseTimeoutRef.current);
+                    wakePulseTimeoutRef.current = null;
+                  }
+                  setWakePulse(true);
+                  wakePulseTimeoutRef.current = setTimeout(() => {
+                    wakePulseTimeoutRef.current = null;
+                    setWakePulse(false);
+                  }, VOICE_WAKE_PULSE_MS);
+
+                  void startListeningRef.current('wake');
+                })
+                .catch((err) => {
+                  console.warn('[SkyDark voice] Wake detection error:', err);
+                });
             }
           }
 
-          // Also send to pipeline if pipeline is active
-          if (currentHandlerIdRef.current > 0) {
-            handlersRef.current.pipeline.sendAudioChunk(conn, currentHandlerIdRef.current, pcm);
+          let handlerId = currentHandlerIdRef.current;
+          if (handlerId >= 0) {
+            handlersRef.current.pipeline.sendAudioChunk(c, handlerId, pcm);
+          }
+
+          handlerId = currentHandlerIdRef.current;
+          if (
+            handlerId >= 0 &&
+            voiceStateRef.current === VoiceState.LISTENING &&
+            !utteranceRef.current.endSent
+          ) {
+            const u = utteranceRef.current;
+            const rms = pcmRmsNormalized(pcm);
+            const now = performance.now();
+            const listen0 = listeningStartedAtRef.current;
+            const pastArmDelay = listen0 > 0 && now - listen0 >= VOICE_HAD_SPEECH_ARM_DELAY_MS;
+            const pastMinListen = listen0 > 0 && now - listen0 >= VOICE_MIN_LISTEN_BEFORE_AUTO_END_MS;
+
+            if (pastArmDelay && rms >= VOICE_UTTERANCE_SPEECH_RMS) {
+              u.hadSpeech = true;
+              u.lastLoudAt = now;
+              u.loudMs += chunkMs;
+            } else if (
+              pastMinListen &&
+              u.hadSpeech &&
+              u.loudMs >= VOICE_MIN_LOUD_MS_FOR_AUTO_END_MS &&
+              now - u.lastLoudAt >= VOICE_UTTERANCE_SILENCE_MS
+            ) {
+              u.endSent = true;
+              handlersRef.current.pipeline.sendAudioDone(c, handlerId);
+              currentHandlerIdRef.current = NO_PIPELINE_HANDLER;
+            } else if (
+              listen0 > 0 &&
+              now - listen0 >= VOICE_MAX_LISTEN_STREAM_MS
+            ) {
+              u.endSent = true;
+              handlersRef.current.pipeline.sendAudioDone(c, handlerId);
+              currentHandlerIdRef.current = NO_PIPELINE_HANDLER;
+            }
           }
         };
 
-        // Start audio capture
         await audio.start();
         isDetectingRef.current = true;
         dispatch({ type: 'WAKE_WORD_LISTENING' });
@@ -235,6 +398,8 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
 
     return () => {
       isDetectingRef.current = false;
+      wakeDetectChainRef.current = Promise.resolve();
+      pcmChunkHandlerRef.current = () => {};
       handlersRef.current.audio.stop();
     };
   }, [conn, isEnabled]);
@@ -271,13 +436,13 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
                 entity_id: entityId,
               };
               try {
-                await conn.sendMessagePromise(ackMsg as Record<string, unknown>);
+                await conn.sendMessagePromise(toHaMessage(ackMsg));
               } catch (err) {
                 console.warn('Failed to send announce_finished', err);
               }
             }
           }
-        }, subscribeMsg);
+        }, toHaMessage(subscribeMsg));
       } catch (err) {
         console.warn('Failed to subscribe to voice satellite events', err);
       }
@@ -286,16 +451,22 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     void subscribe();
 
     return () => {
-      if (unsubscribe) unsubscribe();
+      if (unsubscribe) void unsubscribe();
     };
   }, [conn, entityId, isEnabled]);
 
-  const startListening = useCallback(async () => {
+  const startListening = useCallback(async (initiator: 'wake' | 'tap' = 'tap') => {
     if (!conn || !isEnabled || isSkydarkDemo) return;
+    if (pipelineSessionActiveRef.current) return;
 
+    lastPipelineInitiatorRef.current = initiator;
+
+    pipelineSessionActiveRef.current = true;
     try {
       dispatch({ type: 'CONNECTING' });
       isDetectingRef.current = false;
+      wakeWordDetectorRef.current?.flushPending();
+      resetUtteranceTracking();
 
       const { pipeline } = handlersRef.current;
 
@@ -304,55 +475,88 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
         {
           type: 'voice_satellite/run_pipeline',
           entity_id: entityId,
+          sample_rate: VOICE_SAMPLE_RATE,
           pipeline_id: pipelineId || undefined,
           start_stage: 'stt',
           end_stage: 'tts',
+          /** HA core duplicate wake-up suppression (DATA_LAST_WAKE_UP); same contract as voice_satellite card. */
+          wake_word_phrase: wakePhrase,
         },
         {
-          onSttEnd: (transcript: string) => {
+          onSttEnd: (_transcript: string) => {
             dispatch({ type: 'PROCESSING' });
           },
           onTtsStart: (ttsOutput: string) => {
-            dispatch({ type: 'RESPONDING', transcript: ttsOutput });
+            dispatch({ type: 'RESPONDING', transcript: formatVoiceUserMessage(ttsOutput as unknown) });
           },
           onTtsEnd: () => {
             // End of TTS
           },
           onRunEnd: () => {
-            currentHandlerIdRef.current = 0;
+            currentHandlerIdRef.current = NO_PIPELINE_HANDLER;
             isDetectingRef.current = true;
+            armWakeAfterPipelineEnd();
+            pipelineSessionActiveRef.current = false;
+            resetUtteranceTracking();
             dispatch({ type: 'DONE' });
           },
           onError: (code: string, message: string) => {
-            currentHandlerIdRef.current = 0;
+            currentHandlerIdRef.current = NO_PIPELINE_HANDLER;
             isDetectingRef.current = true;
+            armWakeAfterPipelineEnd();
+            pipelineSessionActiveRef.current = false;
+            resetUtteranceTracking();
+            if (isDuplicateWakeUpPipelineError(code, message)) {
+              dispatch({ type: 'DONE' });
+              return;
+            }
             dispatch({ type: 'ERROR', message });
           },
         }
       );
 
       currentHandlerIdRef.current = handlerId;
+      listeningStartedAtRef.current = performance.now();
       dispatch({ type: 'LISTENING' });
     } catch (err) {
-      currentHandlerIdRef.current = 0;
+      currentHandlerIdRef.current = NO_PIPELINE_HANDLER;
       isDetectingRef.current = true;
-      dispatch({
-        type: 'ERROR',
-        message: err instanceof Error ? err.message : String(err),
-      });
+      armWakeAfterPipelineEnd();
+      pipelineSessionActiveRef.current = false;
+      resetUtteranceTracking();
+      const raw = err instanceof Error ? err.message : formatVoiceUserMessage(err);
+      const colon = raw.indexOf(':');
+      const codePart = colon >= 0 ? raw.slice(0, colon).trim() : raw;
+      const msgPart = colon >= 0 ? raw.slice(colon + 1).trim() : '';
+      if (isDuplicateWakeUpPipelineError(codePart, msgPart || raw)) {
+        dispatch({ type: 'DONE' });
+        return;
+      }
+      dispatch({ type: 'ERROR', message: raw });
     }
-  }, [conn, entityId, isEnabled, pipelineId]);
+  }, [conn, entityId, isEnabled, pipelineId, resetUtteranceTracking, wakePhrase]);
+
+  startListeningRef.current = startListening;
 
   const stopListening = useCallback(() => {
     if (!conn || !isEnabled) return;
     try {
-      currentHandlerIdRef.current = 0;
+      const hid = currentHandlerIdRef.current;
+      if (hid >= 0) {
+        utteranceRef.current.endSent = true;
+        handlersRef.current.pipeline.sendAudioDone(conn, hid);
+      }
+      currentHandlerIdRef.current = NO_PIPELINE_HANDLER;
       isDetectingRef.current = true;
+      lastPipelineInitiatorRef.current = 'tap';
+      armWakeAfterPipelineEnd();
+      pipelineSessionActiveRef.current = false;
+      resetUtteranceTracking();
       dispatch({ type: 'DONE' });
     } catch (err) {
       console.warn('Error stopping audio', err);
     }
-  }, [conn, isEnabled]);
+  }, [conn, isEnabled, resetUtteranceTracking]);
 
   const dismiss = useCallback(() => {
     dispatch({ type: 'DISMISS' });
@@ -376,7 +580,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     };
 
     try {
-      void conn.sendMessagePromise(updateMsg as Record<string, unknown>);
+      void conn.sendMessagePromise(toHaMessage(updateMsg));
     } catch (err) {
       // Silently ignore
     }
@@ -387,9 +591,12 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     transcript: voiceState.transcript,
     error: voiceState.error,
     isEnabled,
-    isListeningForWakeWord: voiceState.isListeningForWakeWord,
+    wakeHandsFreeEnabled: wakeListeningEnabled,
+    isListeningForWakeWord: voiceState.isListeningForWakeWord && wakeListeningEnabled,
     wakeWordDetected: voiceState.wakeWordDetected,
     wakeWordSensitivity,
+    wakePhrase,
+    wakePulse,
     setWakeWordSensitivity: handleSetWakeWordSensitivity,
     startListening,
     stopListening,

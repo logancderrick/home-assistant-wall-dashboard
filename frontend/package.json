@@ -16,8 +16,6 @@
     "@emoji-mart/data": "^1.2.1",
     "@emoji-mart/react": "^1.1.1",
     "@radix-ui/react-switch": "^1.2.6",
-    "@tensorflow/tfjs": "^4.17.0",
-    "@tensorflow/tfjs-tflite": "^0.0.1-alpha.8",
     "date-fns": "^3.6.0",
     "framer-motion": "^11.0.0",
     "hls.js": "^1.6.16",
