@@ -46,6 +46,7 @@ import { isSkydarkDemo } from '../lib/demoMode';
 import { pcmRmsNormalized } from '../lib/voice/pcmLevel';
 import { playWakeEarcon } from '../lib/voice/wakeEarcon';
 import { VoiceContext, type VoiceContextValue } from './voiceContextShared';
+import { matchVoiceDashboardCommand } from '../lib/voice/voiceLocalCommands';
 
 export type { VoiceContextValue };
 
@@ -238,6 +239,8 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   const wakeDetectChainRef = useRef<Promise<void>>(Promise.resolve());
   const lastIntentSpeechRef = useRef('');
   const lastIntentResponseTypeRef = useRef('');
+  /** When set, Assist pipeline speech is skipped in favor of a local summary + speech synthesis. */
+  const dashboardVoiceOverrideRef = useRef<{ summary: string } | null>(null);
 
   const resetUtteranceTracking = useCallback(() => {
     utteranceRef.current = { hadSpeech: false, lastLoudAt: 0, loudMs: 0, endSent: false };
@@ -536,6 +539,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       wakeWordDetectorSecondaryRef.current?.flushPending();
       lastIntentSpeechRef.current = '';
       lastIntentResponseTypeRef.current = '';
+      dashboardVoiceOverrideRef.current = null;
       resetUtteranceTracking();
 
       const { pipeline } = handlersRef.current;
@@ -553,18 +557,78 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
           wake_word_phrase: wakePhraseOverride ?? wakePhrasePrimary,
         },
         {
-          onSttEnd: (_transcript: string) => {
+          onSttEnd: (transcript: string) => {
             dispatch({ type: 'PROCESSING' });
+            dashboardVoiceOverrideRef.current = null;
+            const trimmed = transcript.trim();
+            if (
+              trimmed.length >= 3 &&
+              conn &&
+              skydark?.refetchLists &&
+              skydark?.refetchEvents
+            ) {
+              const matchCmd = matchVoiceDashboardCommand(
+                trimmed,
+                {
+                  lists: skydark.data.lists ?? [],
+                  voiceDefaultListId:
+                    app.settings.voiceDefaultListId?.trim() || undefined,
+                  voiceTimerEntityId:
+                    app.settings.voiceTimerEntityId?.trim() || undefined,
+                  defaultFamilyCalendarMemberId:
+                    app.settings.defaultFamilyCalendarMemberId?.trim(),
+                  pushEventsToCalendarEntityId:
+                    app.settings.pushEventsToCalendarEntityId?.trim(),
+                  listAddLocked: app.isFeatureLocked('addItemsToLists'),
+                  addEventsLocked: app.isFeatureLocked('addEvents'),
+                },
+                {
+                  conn,
+                  refetchLists: skydark.refetchLists,
+                  refetchEvents: skydark.refetchEvents,
+                },
+              );
+              if (matchCmd) {
+                dashboardVoiceOverrideRef.current = { summary: matchCmd.speakSummary };
+                void matchCmd.apply().catch((err) => {
+                  dashboardVoiceOverrideRef.current = null;
+                  console.warn('Voice dashboard shortcut failed:', err);
+                });
+              }
+            }
           },
           onIntentEnd: (speech: string, responseType: string) => {
             lastIntentSpeechRef.current = speech;
             lastIntentResponseTypeRef.current = responseType;
           },
           onTtsStart: (ttsOutput: string) => {
+            const dash = dashboardVoiceOverrideRef.current;
+            if (dash?.summary) {
+              dispatch({
+                type: 'RESPONDING',
+                transcript: formatVoiceUserMessage(dash.summary as unknown),
+              });
+              return;
+            }
             const display = ttsOutput || lastIntentSpeechRef.current;
             dispatch({ type: 'RESPONDING', transcript: formatVoiceUserMessage(display as unknown) });
           },
           onTtsEnd: (ttsUrl?: string) => {
+            const dash = dashboardVoiceOverrideRef.current;
+            if (dash?.summary) {
+              if (voiceResponseMode !== 'off' && dash.summary.trim().length > 0) {
+                try {
+                  if (typeof window !== 'undefined' && window.speechSynthesis) {
+                    window.speechSynthesis.cancel();
+                    const utter = new SpeechSynthesisUtterance(dash.summary);
+                    window.speechSynthesis.speak(utter);
+                  }
+                } catch (err) {
+                  console.warn('Speech synthesis unavailable', err);
+                }
+              }
+              return;
+            }
             const speech = lastIntentSpeechRef.current;
             const responseType = lastIntentResponseTypeRef.current;
             if (shouldSpeakConfirmation(voiceResponseMode, responseType, speech) && ttsUrl) {
@@ -580,6 +644,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
             pipelineSessionActiveRef.current = false;
             lastIntentSpeechRef.current = '';
             lastIntentResponseTypeRef.current = '';
+            dashboardVoiceOverrideRef.current = null;
             resetUtteranceTracking();
             dispatch({ type: 'DONE' });
           },
@@ -590,6 +655,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
             pipelineSessionActiveRef.current = false;
             lastIntentSpeechRef.current = '';
             lastIntentResponseTypeRef.current = '';
+            dashboardVoiceOverrideRef.current = null;
             resetUtteranceTracking();
             if (isDuplicateWakeUpPipelineError(code, message)) {
               dispatch({ type: 'DONE' });
@@ -608,6 +674,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       isDetectingRef.current = true;
       armWakeAfterPipelineEnd();
       pipelineSessionActiveRef.current = false;
+      dashboardVoiceOverrideRef.current = null;
       resetUtteranceTracking();
       const raw = err instanceof Error ? err.message : formatVoiceUserMessage(err);
       const colon = raw.indexOf(':');
@@ -627,6 +694,14 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     resetUtteranceTracking,
     wakePhrasePrimary,
     voiceResponseMode,
+    skydark?.data?.lists,
+    skydark?.refetchLists,
+    skydark?.refetchEvents,
+    app.settings.voiceDefaultListId,
+    app.settings.voiceTimerEntityId,
+    app.settings.defaultFamilyCalendarMemberId,
+    app.settings.pushEventsToCalendarEntityId,
+    app.isFeatureLocked,
   ]);
 
   startListeningRef.current = startListening;

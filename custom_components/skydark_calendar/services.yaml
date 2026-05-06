@@ -265,6 +265,11 @@ create_list:
       default: general
       selector:
         text:
+    ha_todo_entity_id:
+      name: HA to-do entity
+      description: Optional Home Assistant to-do list entity_id (e.g. todo.shopping) for two-way sync.
+      selector:
+        text:
 
 add_list_item:
   name: Add list item
@@ -302,6 +307,33 @@ delete_list_item:
       name: Item ID
       description: ID of the list item row to delete
       required: true
+      selector:
+        text:
+
+toggle_list_item:
+  name: Toggle list item done
+  description: Toggle completion for a list item (syncs to linked HA to-do when configured).
+  fields:
+    item_id:
+      name: Item ID
+      description: ID of the list item row
+      required: true
+      selector:
+        text:
+
+set_list_todo_entity:
+  name: Link list to HA to-do
+  description: Connect a SkyDark list to a Home Assistant todo.* entity (two-way sync), or unlink by omitting the entity.
+  fields:
+    list_id:
+      name: List ID
+      description: SkyDark list UUID
+      required: true
+      selector:
+        text:
+    ha_todo_entity_id:
+      name: To-do entity
+      description: HA entity_id (must start with todo.) or omit to unlink.
       selector:
         text:
 

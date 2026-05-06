@@ -790,6 +790,53 @@ export default function SettingsView() {
                   Example brief response: “Front porch lights turned off.” Use verbose if you want all answers spoken.
                 </p>
               </div>
+              <div className="py-3 border-t border-skydark-border pt-4 mt-2">
+                <p className="text-sm font-medium text-skydark-text mb-1">Wall dashboard voice shortcuts</p>
+                <p className="text-xs text-skydark-text-secondary mb-3 max-w-lg">
+                  After the assistant transcribes your command, this panel can run SkyDark actions directly. Examples:{" "}
+                  <span className="font-mono">add milk to grocery</span>,{" "}
+                  <span className="font-mono">set alarm for 7 p.m.</span>,{" "}
+                  <span className="font-mono">timer 10 minutes</span>,{" "}
+                  <span className="font-mono">in 20 minutes</span>. Short{" "}
+                  <span className="font-mono">add …</span> phrases need a default list below. Countdowns use a Home Assistant
+                  timer when selected; otherwise a short calendar block is created. PIN-locked “add to lists” or “add events”
+                  blocks these shortcuts.
+                </p>
+                <label className="block text-sm font-medium text-skydark-text mb-1.5">
+                  Default list for short “add …” commands
+                </label>
+                <select
+                  className="input-skydark w-full max-w-lg text-sm"
+                  value={settings.voiceDefaultListId ?? ""}
+                  onChange={(e) =>
+                    setSettings({
+                      voiceDefaultListId: e.target.value.trim() || undefined,
+                    })
+                  }
+                  aria-label="Default SkyDark list for voice add"
+                >
+                  <option value="">(none — always say the list name)</option>
+                  {(skydark?.data?.lists ?? []).map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {l.name}
+                    </option>
+                  ))}
+                </select>
+                <label className="block text-sm font-medium text-skydark-text mb-1.5 mt-4">
+                  Timer entity for spoken countdowns (optional)
+                </label>
+                <HaEntitySelect
+                  connection={conn}
+                  domain="timer"
+                  allowEmpty
+                  emptyLabel="(use calendar block instead)"
+                  value={settings.voiceTimerEntityId ?? ""}
+                  onChange={(id) =>
+                    setSettings({ voiceTimerEntityId: id.trim() ? id.trim() : undefined })
+                  }
+                  aria-label="Home Assistant timer for voice countdowns"
+                />
+              </div>
               <div className="py-3">
                 <label className="block text-sm font-medium text-skydark-text mb-1.5">
                   Assist Satellite entity ID

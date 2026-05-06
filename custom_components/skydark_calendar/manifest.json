@@ -4,6 +4,7 @@
   "codeowners": ["@logancderrick"],
   "config_flow": true,
   "dependencies": ["frontend", "http"],
+  "after_dependencies": ["todo"],
   "documentation": "https://github.com/logancderrick/home-assistant-wall-dashboard",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/logancderrick/home-assistant-wall-dashboard/issues",

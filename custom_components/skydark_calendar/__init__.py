@@ -121,17 +121,21 @@ _SERVICES = (
     "add_task",
     "update_task",
     "complete_task",
-    "delete_task",
-    "add_points",
     "add_reward",
     "delete_reward",
+    "add_points",
     "redeem_reward",
     "add_list_item",
+    "delete_list",
+    "delete_list_item",
+    "toggle_list_item",
+    "set_list_todo_entity",
     "create_list",
     "add_meal_recipe",
     "add_meal",
     "update_meal",
     "delete_meal",
+    "delete_task",
     "upload_photo",
     "send_notification",
 )
@@ -187,6 +191,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         await skydark_services.async_setup_services(hass)
 
+        from .list_todo_sync import async_setup_todo_sync
+
+        await async_setup_todo_sync(hass, db)
+
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         return True
     except Exception as err:
@@ -203,6 +211,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    from .list_todo_sync import async_teardown_todo_sync
+
+    await async_teardown_todo_sync(hass)
     for name in _SERVICES:
         hass.services.async_remove(DOMAIN, name)
     if DOMAIN in hass.data:
@@ -210,6 +221,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop("panel_url", None)
         hass.data[DOMAIN].pop("entry_id", None)
         hass.data[DOMAIN].pop("config", None)
-        hass.data[DOMAIN].pop("ws_registered", None)
     async_remove_panel(hass, "skydark")
     return unload_ok

@@ -30,6 +30,8 @@ SERVICE_REDEEM_REWARD = "redeem_reward"
 SERVICE_ADD_LIST_ITEM = "add_list_item"
 SERVICE_DELETE_LIST = "delete_list"
 SERVICE_DELETE_LIST_ITEM = "delete_list_item"
+SERVICE_TOGGLE_LIST_ITEM = "toggle_list_item"
+SERVICE_SET_LIST_TODO_ENTITY = "set_list_todo_entity"
 SERVICE_CREATE_LIST = "create_list"
 SERVICE_ADD_MEAL_RECIPE = "add_meal_recipe"
 SERVICE_ADD_MEAL = "add_meal"
@@ -130,6 +132,7 @@ CREATE_LIST_SCHEMA = vol.Schema(
         vol.Optional("color"): cv.string,
         vol.Optional("owner_id"): cv.string,
         vol.Optional("list_type", default="general"): cv.string,
+        vol.Optional("ha_todo_entity_id"): cv.string,
     },
     extra=vol.PREVENT_EXTRA,
 )
@@ -226,6 +229,21 @@ DELETE_LIST_ITEM_SCHEMA = vol.Schema(
     extra=vol.PREVENT_EXTRA,
 )
 
+TOGGLE_LIST_ITEM_SCHEMA = vol.Schema(
+    {
+        vol.Required("item_id"): cv.string,
+    },
+    extra=vol.PREVENT_EXTRA,
+)
+
+SET_LIST_TODO_ENTITY_SCHEMA = vol.Schema(
+    {
+        vol.Required("list_id"): cv.string,
+        vol.Optional("ha_todo_entity_id"): vol.Any(cv.string, None),
+    },
+    extra=vol.PREVENT_EXTRA,
+)
+
 SEND_NOTIFICATION_SCHEMA = vol.Schema(
     {
         vol.Required("message"): cv.string,
@@ -233,6 +251,35 @@ SEND_NOTIFICATION_SCHEMA = vol.Schema(
     },
     extra=vol.PREVENT_EXTRA,
 )
+
+
+async def async_apply_list_todo_entity_link(
+    hass: HomeAssistant,
+    list_id: str,
+    raw: Any,
+) -> None:
+    """Link or unlink a SkyDark list to a Home Assistant todo.* entity."""
+    if DOMAIN not in hass.data:
+        raise HomeAssistantError("Skydark Calendar is not loaded")
+    db = hass.data[DOMAIN].get("db")
+    if not db:
+        raise HomeAssistantError("Skydark Calendar database is not ready")
+    mgr = hass.data[DOMAIN].get("todo_sync")
+    new_ent = raw.strip().lower() if isinstance(raw, str) else None
+    if new_ent == "":
+        new_ent = None
+    if new_ent and not new_ent.startswith("todo."):
+        raise HomeAssistantError("ha_todo_entity_id must start with todo.")
+    old = await hass.async_add_executor_job(db.get_list, list_id)
+    if not old:
+        raise HomeAssistantError("Unknown list_id")
+    if mgr:
+        mgr.detach_listener(list_id)
+    await hass.async_add_executor_job(db.clear_list_item_ha_uids, list_id)
+    await hass.async_add_executor_job(db.set_list_ha_todo_entity, list_id, new_ent)
+    if mgr and new_ent:
+        await mgr.pull_from_ha(list_id, new_ent)
+        mgr.attach_listener(list_id, new_ent)
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:
@@ -442,22 +489,34 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.exception("redeem_reward failed: %s", e)
 
     async def create_list(call: ServiceCall) -> None:
-        """Create a new list with optional owner."""
+        """Create a new list with optional owner and HA todo link."""
         if DOMAIN not in hass.data:
             return
         db = hass.data[DOMAIN].get("db")
         if not db:
             return
+        mgr = hass.data[DOMAIN].get("todo_sync")
+        raw_ha = call.data.get("ha_todo_entity_id")
+        ha_eid = raw_ha.strip().lower() if isinstance(raw_ha, str) else None
+        if ha_eid == "":
+            ha_eid = None
+        if ha_eid and not ha_eid.startswith("todo."):
+            _LOGGER.warning("create_list: ha_todo_entity_id must start with todo., ignoring")
+            ha_eid = None
         try:
-            await hass.async_add_executor_job(
+            list_id = await hass.async_add_executor_job(
                 partial(
                     db.add_list,
                     name=call.data["name"],
                     color=call.data.get("color"),
                     owner_id=call.data.get("owner_id"),
                     list_type=call.data.get("list_type", "general"),
+                    ha_todo_entity_id=ha_eid,
                 )
             )
+            if mgr and isinstance(list_id, str) and ha_eid:
+                await mgr.pull_from_ha(list_id, ha_eid)
+                mgr.attach_listener(list_id, ha_eid)
         except Exception as e:
             _LOGGER.exception("create_list failed: %s", e)
 
@@ -613,12 +672,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         db = hass.data[DOMAIN].get("db")
         if not db:
             return
+        mgr = hass.data[DOMAIN].get("todo_sync")
         try:
-            await hass.async_add_executor_job(
-                db.add_list_item,
-                call.data["list_id"],
-                call.data["content"],
+            item_id = await hass.async_add_executor_job(
+                partial(db.add_list_item, call.data["list_id"], call.data["content"])
             )
+            if mgr and item_id:
+                await mgr.after_skydark_add_item(
+                    call.data["list_id"], item_id, call.data["content"]
+                )
         except Exception as e:
             _LOGGER.exception("add_list_item failed: %s", e)
 
@@ -629,8 +691,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         db = hass.data[DOMAIN].get("db")
         if not db:
             return
+        mgr = hass.data[DOMAIN].get("todo_sync")
+        lid = call.data["list_id"]
+        if mgr:
+            mgr.detach_listener(lid)
         try:
-            await hass.async_add_executor_job(db.delete_list, call.data["list_id"])
+            await hass.async_add_executor_job(db.delete_list, lid)
         except Exception as e:
             _LOGGER.exception("delete_list failed: %s", e)
 
@@ -641,10 +707,39 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         db = hass.data[DOMAIN].get("db")
         if not db:
             return
+        mgr = hass.data[DOMAIN].get("todo_sync")
+        iid = call.data["item_id"]
+        snapshot = await hass.async_add_executor_job(db.get_list_item, iid)
         try:
-            await hass.async_add_executor_job(db.delete_list_item, call.data["item_id"])
+            await hass.async_add_executor_job(db.delete_list_item, iid)
+            if mgr and snapshot:
+                await mgr.after_skydark_delete_item(snapshot)
         except Exception as e:
             _LOGGER.exception("delete_list_item failed: %s", e)
+
+    async def toggle_list_item(call: ServiceCall) -> None:
+        """Toggle list item completion in SQLite (and synced HA todo if linked)."""
+        if DOMAIN not in hass.data:
+            return
+        db = hass.data[DOMAIN].get("db")
+        if not db:
+            return
+        mgr = hass.data[DOMAIN].get("todo_sync")
+        iid = call.data["item_id"]
+        try:
+            await hass.async_add_executor_job(db.toggle_list_item, iid)
+            if mgr:
+                await mgr.after_skydark_toggle_complete(iid)
+        except Exception as e:
+            _LOGGER.exception("toggle_list_item failed: %s", e)
+
+    async def set_list_todo_entity(call: ServiceCall) -> None:
+        """Link or unlink a SkyDark list to a Home Assistant todo.* entity."""
+        await async_apply_list_todo_entity_link(
+            hass,
+            call.data["list_id"],
+            call.data.get("ha_todo_entity_id"),
+        )
 
     async def send_notification(call: ServiceCall) -> None:
         """Send notification to display."""
@@ -692,6 +787,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, SERVICE_DELETE_LIST_ITEM, delete_list_item, schema=DELETE_LIST_ITEM_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_TOGGLE_LIST_ITEM, toggle_list_item, schema=TOGGLE_LIST_ITEM_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_LIST_TODO_ENTITY,
+        set_list_todo_entity,
+        schema=SET_LIST_TODO_ENTITY_SCHEMA,
     )
     hass.services.async_register(
         DOMAIN, SERVICE_CREATE_LIST, create_list, schema=CREATE_LIST_SCHEMA

@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS lists (
   created_at TEXT,
   owner_id TEXT,
   list_type TEXT DEFAULT 'general',
+  ha_todo_entity_id TEXT,
   FOREIGN KEY (owner_id) REFERENCES family_members(id)
 );
 
@@ -94,6 +95,7 @@ CREATE TABLE IF NOT EXISTS list_items (
   completed INTEGER DEFAULT 0,
   sort_order INTEGER,
   created_at TEXT,
+  ha_todo_uid TEXT,
   FOREIGN KEY (list_id) REFERENCES lists(id)
 );
 
@@ -228,6 +230,10 @@ class SkydarkDatabase:
                 conn.execute("ALTER TABLE meal_recipes ADD COLUMN image_url TEXT")
             if not self._column_exists(conn, "meal_recipes", "instructions"):
                 conn.execute("ALTER TABLE meal_recipes ADD COLUMN instructions TEXT")
+            if not self._column_exists(conn, "lists", "ha_todo_entity_id"):
+                conn.execute("ALTER TABLE lists ADD COLUMN ha_todo_entity_id TEXT")
+            if not self._column_exists(conn, "list_items", "ha_todo_uid"):
+                conn.execute("ALTER TABLE list_items ADD COLUMN ha_todo_uid TEXT")
             self._seed_default_family_members(conn)
             self._seed_default_frontend_app_settings(conn)
 
@@ -610,6 +616,7 @@ class SkydarkDatabase:
         color: str | None = None,
         owner_id: str | None = None,
         list_type: str = "general",
+        ha_todo_entity_id: str | None = None,
     ) -> str:
         id_ = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -617,10 +624,169 @@ class SkydarkDatabase:
             cur = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM lists")
             sort_order = cur.fetchone()[0]
             conn.execute(
-                "INSERT INTO lists (id, name, color, sort_order, created_at, owner_id, list_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (id_, name, color or "#E8D8F5", sort_order, now, owner_id, list_type),
+                "INSERT INTO lists (id, name, color, sort_order, created_at, owner_id, list_type, ha_todo_entity_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    id_,
+                    name,
+                    color or "#E8D8F5",
+                    sort_order,
+                    now,
+                    owner_id,
+                    list_type,
+                    ha_todo_entity_id,
+                ),
             )
         return id_
+
+    def get_list(self, list_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            cur = conn.execute("SELECT * FROM lists WHERE id = ?", (list_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def get_list_item(self, item_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            cur = conn.execute("SELECT * FROM list_items WHERE id = ?", (item_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def set_list_ha_todo_entity(
+        self, list_id: str, ha_todo_entity_id: str | None
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE lists SET ha_todo_entity_id = ? WHERE id = ?",
+                (ha_todo_entity_id, list_id),
+            )
+
+    def clear_list_item_ha_uids(self, list_id: str) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE list_items SET ha_todo_uid = NULL WHERE list_id = ?",
+                (list_id,),
+            )
+
+    def set_list_item_ha_uid(self, item_id: str, ha_todo_uid: str | None) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE list_items SET ha_todo_uid = ? WHERE id = ?",
+                (ha_todo_uid, item_id),
+            )
+
+    def set_list_item_completed(self, item_id: str, completed: int) -> None:
+        """Set completion bit (0 or 1)."""
+        if completed not in (0, 1):
+            completed = int(bool(completed))
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE list_items SET completed = ? WHERE id = ?",
+                (completed, item_id),
+            )
+
+    def delete_all_list_items(self, list_id: str) -> None:
+        with self._connection() as conn:
+            conn.execute("DELETE FROM list_items WHERE list_id = ?", (list_id,))
+
+    def merge_ha_items_into_list(self, list_id: str, ha_items: list[dict[str, Any]]) -> None:
+        """Upsert/remove rows from HA todo payloads (todo.get_items / asdict shapes).
+
+        Rows that only exist locally (ha_todo_uid NULL) remain unless they duplicate a matching uid.
+        """
+        if not ha_items:
+            with self._connection() as conn:
+                cur = conn.execute(
+                    "SELECT id FROM list_items WHERE list_id = ? AND ha_todo_uid IS NOT NULL AND ha_todo_uid != ''",
+                    (list_id,),
+                )
+                for (row_id,) in cur.fetchall():
+                    conn.execute("DELETE FROM list_items WHERE id = ?", (row_id,))
+            return
+
+        def _completed_from_status(raw: Any) -> int:
+            return 1 if raw == "completed" else 0
+
+        normalized: list[tuple[str, str, int]] = []
+        for hi in ha_items:
+            uid = hi.get("uid")
+            summary = hi.get("summary")
+            if not uid or summary is None:
+                continue
+            summary = str(summary).strip()
+            if not summary:
+                continue
+            cm = _completed_from_status(hi.get("status"))
+            normalized.append((str(uid), summary, cm))
+        incoming_uids = {t[0] for t in normalized}
+
+        with self._connection() as conn:
+            cur = conn.execute(
+                "SELECT * FROM list_items WHERE list_id = ? ORDER BY sort_order, created_at",
+                (list_id,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+
+            for row in rows:
+                rid = row["id"]
+                ruid = row.get("ha_todo_uid") or ""
+                if ruid and ruid not in incoming_uids:
+                    conn.execute("DELETE FROM list_items WHERE id = ?", (rid,))
+
+            cur = conn.execute(
+                "SELECT * FROM list_items WHERE list_id = ? ORDER BY sort_order, created_at",
+                (list_id,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            uid_row = {
+                row["ha_todo_uid"]: row
+                for row in rows
+                if row.get("ha_todo_uid")
+            }
+            orphans = [
+                row
+                for row in rows
+                if not row.get("ha_todo_uid")
+                and str(row.get("content", "")).strip()
+            ]
+
+            attach_used: set[int] = set()
+
+            sort_next = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM list_items WHERE list_id = ?",
+                (list_id,),
+            ).fetchone()[0]
+
+            now = datetime.now(timezone.utc).isoformat()
+
+            for uid, summary, cm in normalized:
+                if uid in uid_row:
+                    conn.execute(
+                        "UPDATE list_items SET content = ?, completed = ?, ha_todo_uid = ? WHERE id = ?",
+                        (summary, cm, uid, uid_row[uid]["id"]),
+                    )
+                    continue
+                claimed: dict[str, Any] | None = None
+                for i, orb in enumerate(orphans):
+                    if i in attach_used:
+                        continue
+                    if orb.get("content", "").strip() == summary:
+                        claimed = orb
+                        attach_used.add(i)
+                        break
+                if claimed:
+                    conn.execute(
+                        "UPDATE list_items SET content = ?, completed = ?, ha_todo_uid = ? WHERE id = ?",
+                        (summary, cm, uid, claimed["id"]),
+                    )
+                    continue
+
+                conn.execute(
+                    """
+                    INSERT INTO list_items (id, list_id, content, completed, sort_order, created_at, ha_todo_uid)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (str(uuid.uuid4()), list_id, summary, cm, sort_next, now, uid),
+                )
+                sort_next += 1
 
     def delete_list(self, list_id: str) -> None:
         with self._connection() as conn:
@@ -650,9 +816,16 @@ class SkydarkDatabase:
             result[lid].append(row)
         return result
 
-    def add_list_item(self, list_id: str, content: str) -> str:
+    def add_list_item(
+        self,
+        list_id: str,
+        content: str,
+        completed: int = 0,
+        ha_todo_uid: str | None = None,
+    ) -> str:
         id_ = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
+        c = 1 if completed else 0
         with self._connection() as conn:
             cur = conn.execute(
                 "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM list_items WHERE list_id = ?",
@@ -660,8 +833,8 @@ class SkydarkDatabase:
             )
             sort_order = cur.fetchone()[0]
             conn.execute(
-                "INSERT INTO list_items (id, list_id, content, completed, sort_order, created_at) VALUES (?, ?, ?, 0, ?, ?)",
-                (id_, list_id, content, sort_order, now),
+                "INSERT INTO list_items (id, list_id, content, completed, sort_order, created_at, ha_todo_uid) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (id_, list_id, content, c, sort_order, now, ha_todo_uid),
             )
         return id_
 

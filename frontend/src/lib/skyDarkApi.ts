@@ -48,6 +48,8 @@ export interface SkydarkList {
   sort_order?: number | null;
   owner_id?: string | null;
   list_type?: string | null;
+  /** When set, this list syncs with Home Assistant `todo.*` (two-way). */
+  ha_todo_entity_id?: string | null;
 }
 
 export interface SkydarkListItem {
@@ -57,6 +59,7 @@ export interface SkydarkListItem {
   completed: number;
   sort_order?: number | null;
   created_at?: string | null;
+  ha_todo_uid?: string | null;
 }
 
 export interface SkydarkMeal {
@@ -87,6 +90,9 @@ export interface SkydarkConfig {
 
 const SEND_TIMEOUT_MS = 20_000;
 
+/** See ``SETTINGS_KEY_LIST_TODO_LINK`` in ``websocket_api.py`` (embedded list↔todo link command). */
+const APP_SETTINGS_LIST_TODO_LINK_CMD = "_skydark_list_todo_link";
+
 function send<T>(conn: Connection, message: { type: string; [key: string]: unknown }): Promise<T> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const msgPromise = conn.sendMessagePromise(message as any) as Promise<T>;
@@ -100,6 +106,91 @@ function send<T>(conn: Connection, message: { type: string; [key: string]: unkno
       (e) => { clearTimeout(timer); reject(e); },
     );
   });
+}
+
+/** True when HA rejects a WebSocket request because ``type`` has no handler (often older Core / custom_component). */
+function haRejectedUnknownWsCommand(err: unknown): boolean {
+  if (typeof err === "object" && err !== null) {
+    const o = err as Record<string, unknown>;
+    const errObj =
+      typeof o.error === "object" && o.error !== null ? (o.error as Record<string, unknown>) : null;
+    const code = typeof errObj?.code === "string" ? errObj.code.toLowerCase() : "";
+    const nestedMsg = typeof errObj?.message === "string" ? errObj.message.toLowerCase() : "";
+    const flatMsg = typeof o.message === "string" ? o.message.toLowerCase() : "";
+    if ((code.includes("unknown") && code.includes("command")) || nestedMsg.includes("unknown command"))
+      return true;
+    if (flatMsg.includes("unknown command")) return true;
+  }
+  if (err instanceof Error && /unknown command/i.test(err.message)) return true;
+  const s = String(err ?? "").toLowerCase();
+  return s.includes("unknown command");
+}
+
+function haServiceNotFound(err: unknown): boolean {
+  const flat =
+    typeof err === "object" && err !== null && "message" in err && typeof (err as { message: unknown }).message === "string"
+      ? String((err as { message: string }).message).toLowerCase()
+      : err instanceof Error
+        ? err.message.toLowerCase()
+        : String(err ?? "").toLowerCase();
+  return (
+    (flat.includes("service") && flat.includes("not found")) ||
+    flat.includes("unknown_service")
+  );
+}
+
+function normalizedListTodoEntityId(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  const t = raw.trim().toLowerCase();
+  return t && t.startsWith("todo.") ? t : null;
+}
+
+/** When using Vite, the SkyDark UI is local but HA APIs still hit `VITE_HASS_URL`; custom_components must live there. */
+function listTodoLinkHaDeployHint(): string {
+  if (!import.meta.env.DEV) return "";
+  return (
+    " With `npm run dev`, SkyDark talks to Home Assistant from `VITE_HASS_URL`—copy this repo's `custom_components/skydark_calendar/` onto that server's `/config/` tree and reload SkyDark Calendar; updating only the repo on your dev machine does not change HA."
+  );
+}
+
+async function persistListTodoViaAppSettings(
+  conn: Connection,
+  data: { list_id: string; ha_todo_entity_id?: string },
+): Promise<{ success: boolean }> {
+  const fetched = await fetchAppSettings(conn);
+  const baseline = fetched.settings && typeof fetched.settings === "object" ? fetched.settings : {};
+  const out = await saveAppSettings(conn, {
+    ...(baseline as Record<string, unknown>),
+    [APP_SETTINGS_LIST_TODO_LINK_CMD]: {
+      list_id: data.list_id,
+      ...(data.ha_todo_entity_id !== undefined ? { ha_todo_entity_id: data.ha_todo_entity_id } : {}),
+    },
+  });
+  /** Authoritative check: ``get_app_settings`` strips the sentinel, so use list rows from ``get_lists``. */
+  const want = normalizedListTodoEntityId(data.ha_todo_entity_id);
+  const hint = listTodoLinkHaDeployHint();
+  let sawRow = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 120 * attempt);
+      });
+    }
+    const { lists } = await fetchLists(conn);
+    const row = lists.find((l) => l.id === data.list_id);
+    if (!row) continue;
+    sawRow = true;
+    const got = normalizedListTodoEntityId(row.ha_todo_entity_id ?? undefined);
+    if (want === got) return out;
+  }
+  if (!sawRow) {
+    throw new Error(
+      `List disappeared after linking; reload the Lists page.${hint}`,
+    );
+  }
+  throw new Error(
+    `Todo list link was not applied on the server (HA did not persist \`ha_todo_entity_id\`). Install matching \`custom_components/skydark_calendar\` on Home Assistant—including \`websocket_api.py\` and \`services.py\`, with the list-todo link handlers—then restart Core or reload SkyDark Calendar.${hint}`,
+  );
 }
 
 export async function fetchEvents(
@@ -425,6 +516,16 @@ export async function serviceAddEvent(
   return callService(conn, DOMAIN, "add_event", data);
 }
 
+/** Start a Home Assistant `timer.*` helper with HH:MM:SS duration. */
+export async function serviceTimerStart(conn: Connection, timerEntityId: string, durationSeconds: number): Promise<unknown> {
+  const secs = Math.max(1, Math.floor(durationSeconds));
+  const hh = Math.floor(secs / 3600);
+  const mm = Math.floor((secs % 3600) / 60);
+  const ss = secs % 60;
+  const duration = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  return callService(conn, "timer", "start", { duration }, { entity_id: timerEntityId });
+}
+
 /**
  * Mirror a new event onto another HA calendar (e.g. Google) via calendar.create_event.
  * Skips silently if the entity id is missing or invalid.
@@ -560,9 +661,18 @@ export async function serviceRedeemReward(
 
 export async function serviceCreateList(
   conn: Connection,
-  data: { name: string; color?: string; owner_id?: string; list_type?: string }
+  data: {
+    name: string;
+    color?: string;
+    owner_id?: string;
+    list_type?: string;
+    ha_todo_entity_id?: string;
+  }
 ): Promise<unknown> {
-  return callService(conn, DOMAIN, "create_list", { ...data, list_type: data.list_type ?? "general" });
+  return callService(conn, DOMAIN, "create_list", {
+    ...data,
+    list_type: data.list_type ?? "general",
+  });
 }
 
 export async function serviceAddListItem(
@@ -578,6 +688,48 @@ export async function serviceDeleteList(conn: Connection, listId: string): Promi
 
 export async function serviceDeleteListItem(conn: Connection, itemId: string): Promise<unknown> {
   return callService(conn, DOMAIN, "delete_list_item", { item_id: itemId });
+}
+
+export async function serviceToggleListItem(conn: Connection, itemId: string): Promise<unknown> {
+  return callService(conn, DOMAIN, "toggle_list_item", { item_id: itemId });
+}
+
+/**
+ * Link or unlink a SkyDark list to HA `todo.*`: dedicated WS → HA service → app-settings shim
+ * (last path works when HA has updated ``set_app_settings`` but no standalone command/service).
+ */
+export async function serviceSetListTodoEntity(
+  conn: Connection,
+  data: { list_id: string; ha_todo_entity_id?: string },
+): Promise<unknown> {
+  const wsMsg = {
+    type: "skydark_calendar/set_list_todo_entity",
+    list_id: data.list_id,
+    ...(data.ha_todo_entity_id !== undefined ? { ha_todo_entity_id: data.ha_todo_entity_id } : {}),
+  };
+  try {
+    return await send(conn, wsMsg);
+  } catch (err: unknown) {
+    if (!haRejectedUnknownWsCommand(err)) throw err;
+    try {
+      return await persistListTodoViaAppSettings(conn, data);
+    } catch (pig: unknown) {
+      if (
+        pig instanceof Error &&
+        (pig.message.includes("Todo list link was") || pig.message.includes("List disappeared after linking"))
+      ) {
+        throw pig;
+      }
+      try {
+        return await callService(conn, DOMAIN, "set_list_todo_entity", data);
+      } catch (svcErr: unknown) {
+        if (haServiceNotFound(svcErr)) {
+          throw pig instanceof Error ? pig : svcErr;
+        }
+        throw svcErr;
+      }
+    }
+  }
 }
 
 export async function serviceAddMealRecipe(

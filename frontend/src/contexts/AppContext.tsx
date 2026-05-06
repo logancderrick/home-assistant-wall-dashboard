@@ -131,6 +131,10 @@ export interface AppSettings {
   voiceWakeWordModelIdSecondary?: string;
   /** Voice confirmation verbosity after commands complete. */
   voiceResponseMode?: "off" | "brief" | "verbose";
+  /** Default SkyDark list for short phrases ("add milk") spoken via Assist. */
+  voiceDefaultListId?: string;
+  /** Optional HA `timer.*` for spoken countdowns ("timer 10 minutes"); otherwise a calendar block is created. */
+  voiceTimerEntityId?: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -304,6 +308,20 @@ function normalizeSettings(candidate: Partial<AppSettings> | null | undefined): 
     merged.voiceResponseMode !== "verbose"
   ) {
     merged.voiceResponseMode = DEFAULT_SETTINGS.voiceResponseMode;
+  }
+  if (merged.voiceDefaultListId !== undefined) {
+    if (typeof merged.voiceDefaultListId !== "string") merged.voiceDefaultListId = undefined;
+    else {
+      const t = merged.voiceDefaultListId.trim();
+      merged.voiceDefaultListId = t || undefined;
+    }
+  }
+  if (merged.voiceTimerEntityId !== undefined) {
+    if (typeof merged.voiceTimerEntityId !== "string") merged.voiceTimerEntityId = undefined;
+    else {
+      const t = merged.voiceTimerEntityId.trim();
+      merged.voiceTimerEntityId = t || undefined;
+    }
   }
   return merged;
 }

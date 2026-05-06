@@ -11,8 +11,10 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import DOMAIN
+from .services import async_apply_list_todo_entity_link
 from .ha_remote_calendar import merge_remote_calendar_events, parse_skydark_ws_event_range
 from .photo_media import (
     delete_managed_media_file,
@@ -22,6 +24,10 @@ from .photo_media import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Embedded in frontend_app_settings_v1 payloads by the dashboard when dedicated WS /
+# HA service are unavailable; stripped before persistence and excluded from reads.
+SETTINGS_KEY_LIST_TODO_LINK = "_skydark_list_todo_link"
 
 
 def _get_db(hass: HomeAssistant):
@@ -149,6 +155,39 @@ async def websocket_get_lists(
     except Exception as e:
         _LOGGER.exception("websocket get_lists failed: %s", e)
         connection.send_error(msg["id"], "failed", "An error occurred loading lists.")
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "skydark_calendar/set_list_todo_entity",
+        vol.Required("list_id"): str,
+        vol.Optional("ha_todo_entity_id"): vol.Any(str, None),
+    }
+)
+@websocket_api.async_response
+async def websocket_set_list_todo_entity(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Link or unlink a list to a todo.* entity (same behavior as the HA service)."""
+    if not _get_db(hass):
+        connection.send_error(msg["id"], "not_ready", "Integration not loaded")
+        return
+    try:
+        await async_apply_list_todo_entity_link(
+            hass,
+            str(msg["list_id"]),
+            msg.get("ha_todo_entity_id"),
+        )
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "invalid_request", str(err))
+        return
+    except Exception as e:
+        _LOGGER.exception("websocket set_list_todo_entity failed: %s", e)
+        connection.send_error(msg["id"], "failed", "Could not update list link.")
+        return
+    connection.send_result(msg["id"], {})
 
 
 @websocket_api.websocket_command(
@@ -659,6 +698,7 @@ async def websocket_get_app_settings(
                 parsed_blob = candidate
         except (TypeError, ValueError):
             parsed_blob = {}
+        parsed_blob.pop(SETTINGS_KEY_LIST_TODO_LINK, None)
         connection.send_result(msg["id"], {"settings": parsed_blob})
     except Exception as e:
         _LOGGER.exception("websocket get_app_settings failed: %s", e)
@@ -683,10 +723,29 @@ async def websocket_set_app_settings(
         connection.send_error(msg["id"], "not_ready", "Integration not loaded")
         return
     try:
-        settings_blob = msg.get("settings", {})
+        settings_blob = dict(msg.get("settings") or {})
         if not isinstance(settings_blob, dict):
             connection.send_error(msg["id"], "invalid_format", "settings must be an object")
             return
+        link_cmd = settings_blob.pop(SETTINGS_KEY_LIST_TODO_LINK, None)
+        if isinstance(link_cmd, dict) and link_cmd.get("list_id"):
+            try:
+                await async_apply_list_todo_entity_link(
+                    hass,
+                    str(link_cmd["list_id"]),
+                    link_cmd.get("ha_todo_entity_id"),
+                )
+            except HomeAssistantError as err:
+                connection.send_error(msg["id"], "invalid_request", str(err))
+                return
+            except Exception as e:
+                _LOGGER.exception(
+                    "set_app_settings embedded list todo link failed: %s", e
+                )
+                connection.send_error(
+                    msg["id"], "failed", "Could not update list todo link."
+                )
+                return
         await hass.async_add_executor_job(
             db.save_setting, "frontend_app_settings_v1", json.dumps(settings_blob)
         )
@@ -697,13 +756,17 @@ async def websocket_set_app_settings(
 
 
 async def async_register_websocket_handlers(hass: HomeAssistant) -> None:
-    """Register WebSocket API handlers (skip if already registered on reload)."""
-    if hass.data.get(DOMAIN, {}).get("ws_registered"):
-        return
+    """Register WebSocket API handlers.
+
+    Re-registers on every config entry setup; HA overwrites prior handlers for the
+    same command type (no duplicate-handler issue). Avoids ``ws_registered`` skipping
+    registration after in-place custom component updates without a full Core restart.
+    """
     await hass.async_add_executor_job(ensure_calendar_media_dir, hass)
     websocket_api.async_register_command(hass, websocket_get_events)
     websocket_api.async_register_command(hass, websocket_get_tasks)
     websocket_api.async_register_command(hass, websocket_get_lists)
+    websocket_api.async_register_command(hass, websocket_set_list_todo_entity)
     websocket_api.async_register_command(hass, websocket_get_family_members)
     websocket_api.async_register_command(hass, websocket_get_photos)
     websocket_api.async_register_command(hass, websocket_add_photo)
@@ -720,4 +783,3 @@ async def async_register_websocket_handlers(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_delete_reward)
     websocket_api.async_register_command(hass, websocket_get_meal_recipes)
     websocket_api.async_register_command(hass, websocket_add_meal_recipe)
-    hass.data.setdefault(DOMAIN, {})["ws_registered"] = True

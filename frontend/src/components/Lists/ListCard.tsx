@@ -1,6 +1,8 @@
 import { useState } from "react";
+import type { Connection } from "home-assistant-js-websocket";
 import ListItem from "./ListItem";
 import CloseIcon from "../Common/CloseIcon";
+import HaEntitySelect from "../Settings/HaEntitySelect";
 
 export interface ListItemData {
   id: string;
@@ -18,6 +20,9 @@ interface ListCardProps {
   onToggleItem: (itemId: string) => void;
   onDeleteItem: (itemId: string) => void;
   onDeleteList?: () => void;
+  hassConnection?: Connection | null;
+  haTodoEntityId?: string | null;
+  onHaTodoChange?: (entityId: string) => void;
 }
 
 export default function ListCard({
@@ -30,6 +35,9 @@ export default function ListCard({
   onToggleItem,
   onDeleteItem,
   onDeleteList,
+  hassConnection = null,
+  haTodoEntityId,
+  onHaTodoChange,
 }: ListCardProps) {
   const [input, setInput] = useState("");
 
@@ -74,6 +82,23 @@ export default function ListCard({
           )}
         </div>
       </div>
+      {hassConnection && onHaTodoChange && (
+        <div className="px-4 pb-2 border-t border-skydark-border/40 pt-2">
+          <label className="block text-[11px] font-medium text-skydark-text-secondary mb-1">
+            Home Assistant to-do (mobile sync)
+          </label>
+          <HaEntitySelect
+            connection={hassConnection}
+            domain="todo"
+            allowEmpty
+            emptyLabel="(dashboard only — no sync)"
+            value={haTodoEntityId ?? ""}
+            onChange={(eid) => onHaTodoChange(eid.trim() ? eid.trim() : "")}
+            aria-label={`Link HA to-do list for ${name}`}
+            className="input-skydark w-full text-xs py-2"
+          />
+        </div>
+      )}
       <form onSubmit={handleSubmit} className="px-4 pb-2">
         <input
           type="text"

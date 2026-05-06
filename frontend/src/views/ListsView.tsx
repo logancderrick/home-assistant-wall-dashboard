@@ -1,16 +1,20 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import ListCard, { type ListItemData } from "../components/Lists/ListCard";
 import Modal from "../components/Common/Modal";
 import PinPrompt from "../components/Common/PinPrompt";
 import { useAppContext } from "../contexts/AppContext";
 import { useSkydarkDataContext } from "../contexts/SkydarkDataContext";
 import { usePinGate } from "../hooks/usePinGate";
+import HaEntitySelect from "../components/Settings/HaEntitySelect";
 import {
   serviceCreateList,
   serviceAddListItem,
   serviceDeleteList,
   serviceDeleteListItem,
+  serviceToggleListItem,
+  serviceSetListTodoEntity,
 } from "../lib/skyDarkApi";
+import { formatVoiceUserMessage } from "../lib/voice/formatVoiceUserMessage";
 import { SKYDARK_COLORS } from "../config/theme";
 
 export interface ListData {
@@ -18,6 +22,7 @@ export interface ListData {
   name: string;
   color: string;
   owner_id?: string | null;
+  ha_todo_entity_id?: string | null;
   items: ListItemData[];
 }
 
@@ -26,7 +31,13 @@ const FALLBACK_LISTS: ListData[] = [
 ];
 
 function buildListsFromSkydark(
-  lists: { id: string; name: string; color?: string | null; owner_id?: string | null }[],
+  lists: {
+    id: string;
+    name: string;
+    color?: string | null;
+    owner_id?: string | null;
+    ha_todo_entity_id?: string | null;
+  }[],
   listItems: Record<string, { id: string; content: string; completed: number }[]>
 ): ListData[] {
   return lists.map((list) => ({
@@ -34,6 +45,7 @@ function buildListsFromSkydark(
     name: list.name,
     color: list.color ?? "#C8E6F5",
     owner_id: list.owner_id ?? null,
+    ha_todo_entity_id: list.ha_todo_entity_id ?? null,
     items: (listItems[list.id] ?? []).map((i) => ({
       id: i.id,
       content: i.content,
@@ -52,7 +64,7 @@ export default function ListsView() {
   const [newListName, setNewListName] = useState("");
   const [newListColor, setNewListColor] = useState<string>(SKYDARK_COLORS[0] ?? "#C8E6F5");
   const [newListOwnerId, setNewListOwnerId] = useState<string>("");
-  const [localToggles, setLocalToggles] = useState<Set<string>>(new Set());
+  const [newListHaTodoId, setNewListHaTodoId] = useState("");
   const [localLists, setLocalLists] = useState<ListData[]>(FALLBACK_LISTS);
   const [createListSaving, setCreateListSaving] = useState(false);
   const [createListError, setCreateListError] = useState<string | null>(null);
@@ -64,15 +76,23 @@ export default function ListsView() {
     return buildListsFromSkydark(skydark.data.lists, skydark.data.listItems ?? {});
   }, [skydark?.data?.connection, skydark?.data?.lists, skydark?.data?.listItems]);
 
-  const lists = skydark?.data?.connection
-    ? serverLists.map((list) => ({
-        ...list,
-        items: list.items.map((i) => ({
-          ...i,
-          completed: localToggles.has(i.id) ? !i.completed : i.completed,
-        })),
-      }))
-    : localLists;
+  const lists = skydark?.data?.connection ? serverLists : localLists;
+
+  const hasLinkedTodo = useMemo(
+    () =>
+      (skydark?.data?.lists ?? []).some((l) =>
+        String(l.ha_todo_entity_id ?? "").trim().startsWith("todo."),
+      ),
+    [skydark?.data?.lists],
+  );
+
+  useEffect(() => {
+    if (!skydark?.data?.connection || !hasLinkedTodo) return;
+    const id = window.setInterval(() => {
+      void skydark.refetchLists();
+    }, 12_000);
+    return () => window.clearInterval(id);
+  }, [skydark?.data?.connection, hasLinkedTodo, skydark]);
 
   const addItem = (listId: string, content: string) => {
     runIfUnlocked("addItemsToLists", () => doAddItem(listId, content));
@@ -98,22 +118,29 @@ export default function ListsView() {
   };
 
   const toggleItem = (listId: string, itemId: string) => {
-    runIfUnlocked("checkLists", () => {
-      if (skydark?.data?.connection) {
-        setLocalToggles((prev) => {
-          const next = new Set(prev);
-          if (next.has(itemId)) next.delete(itemId);
-          else next.add(itemId);
-          return next;
-        });
-      } else {
-        setLocalLists((prev) =>
-          prev.map((list) => {
-            if (list.id !== listId) return list;
-            return { ...list, items: list.items.map((i) => (i.id === itemId ? { ...i, completed: !i.completed } : i)) };
-          })
-        );
+    runIfUnlocked("checkLists", async () => {
+      const conn = skydark?.data?.connection;
+      if (conn) {
+        setListsError(null);
+        try {
+          await serviceToggleListItem(conn, itemId);
+          await skydark?.refetchLists?.();
+        } catch (e) {
+          setListsError(e instanceof Error ? e.message : "Could not update item.");
+        }
+        return;
       }
+      setLocalLists((prev) =>
+        prev.map((list) => {
+          if (list.id !== listId) return list;
+          return {
+            ...list,
+            items: list.items.map((i) =>
+              i.id === itemId ? { ...i, completed: !i.completed } : i,
+            ),
+          };
+        }),
+      );
     });
   };
 
@@ -127,11 +154,6 @@ export default function ListsView() {
       setListsError(null);
       try {
         await serviceDeleteListItem(conn, itemId);
-        setLocalToggles((prev) => {
-          const next = new Set(prev);
-          next.delete(itemId);
-          return next;
-        });
         await skydark?.refetchLists?.();
       } catch (e) {
         setListsError(e instanceof Error ? e.message : "Could not delete item.");
@@ -173,6 +195,32 @@ export default function ListsView() {
     });
   };
 
+  const persistHaTodoLink = useCallback(
+    (listId: string, entityId: string) => {
+      runIfUnlocked("createLists", async () => {
+        const conn = skydark?.data?.connection;
+        if (!conn) return;
+        setListsError(null);
+        try {
+          const canon = entityId.trim().toLowerCase();
+          await serviceSetListTodoEntity(conn, {
+            list_id: listId,
+            ...(canon.startsWith("todo.") ? { ha_todo_entity_id: canon } : {}),
+          });
+        } catch (e) {
+          setListsError(formatVoiceUserMessage(e));
+          return;
+        }
+        try {
+          await skydark.refetchLists();
+        } catch (e) {
+          setListsError(`List link updated, but refresh failed: ${formatVoiceUserMessage(e)}`);
+        }
+      });
+    },
+    [runIfUnlocked, skydark],
+  );
+
   const createList = () => {
     const name = newListName.trim();
     if (!name) return;
@@ -185,14 +233,17 @@ export default function ListsView() {
     const conn = skydark?.data?.connection;
     try {
       if (conn) {
+        const haCanon = newListHaTodoId.trim().toLowerCase();
         await serviceCreateList(conn, {
           name,
           color: newListColor,
           owner_id: newListOwnerId || undefined,
+          ...(haCanon.startsWith("todo.") ? { ha_todo_entity_id: haCanon } : {}),
         });
         setNewListName("");
         setNewListColor(SKYDARK_COLORS[0] ?? "#C8E6F5");
         setNewListOwnerId("");
+        setNewListHaTodoId("");
         setAddListOpen(false);
         await skydark?.refetchLists?.();
       } else {
@@ -269,6 +320,9 @@ export default function ListsView() {
             onToggleItem={(itemId) => toggleItem(list.id, itemId)}
             onDeleteItem={(itemId) => deleteItem(list.id, itemId)}
             onDeleteList={() => requestDeleteList(list.id)}
+            hassConnection={skydark?.data?.connection ?? null}
+            haTodoEntityId={list.ha_todo_entity_id}
+            onHaTodoChange={(eid) => persistHaTodoLink(list.id, eid)}
           />
         ))}
       </div>
@@ -333,6 +387,26 @@ export default function ListsView() {
               ))}
             </select>
           </div>
+          {skydark?.data?.connection && (
+            <div>
+              <label className="block text-sm font-medium text-skydark-text mb-1">
+                Home Assistant to-do (optional)
+              </label>
+              <HaEntitySelect
+                connection={skydark.data.connection}
+                domain="todo"
+                allowEmpty
+                emptyLabel="(dashboard only)"
+                value={newListHaTodoId}
+                onChange={setNewListHaTodoId}
+                disabled={createListSaving}
+                aria-label="HA to-do entity for new list"
+              />
+              <p className="text-xs text-skydark-text-secondary mt-1">
+                Two-way sync with the HA app — pick any existing HA to-do list from the dropdown.
+              </p>
+            </div>
+          )}
           <div className="flex gap-2 pt-2">
             <button
               type="button"
