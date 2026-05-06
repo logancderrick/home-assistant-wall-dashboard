@@ -22,7 +22,11 @@ export interface VoiceContextValue {
   /** Brief UI pulse after on-device wake (earcon plays in parallel). */
   wakePulse: boolean;
   setWakeWordSensitivity: (value: number) => void;
-  startListening: (initiator?: "wake" | "tap") => Promise<void>;
+  startListening: (
+    initiator?: "wake" | "tap",
+    pipelineOverrideId?: string,
+    wakePhraseOverride?: string,
+  ) => Promise<void>;
   stopListening: () => void;
   dismiss: () => void;
 }

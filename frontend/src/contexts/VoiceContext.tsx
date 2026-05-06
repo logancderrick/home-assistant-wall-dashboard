@@ -36,6 +36,7 @@ import { createPipelineComms, isDuplicateWakeUpPipelineError } from '../lib/voic
 import { createTtsPlayer } from '../lib/voice/ttsPlayer';
 import {
   createWakeWordDetector,
+  parseOptionalVoiceWakeWordModelId,
   parseVoiceWakeWordModelId,
   VOICE_WAKE_WORD_MODEL_LABELS,
   type WakeWordDetector,
@@ -50,6 +51,23 @@ export type { VoiceContextValue };
 
 /** No active voice_satellite binary handler — do not use 0 (HA may assign handler id 0). */
 const NO_PIPELINE_HANDLER = -1;
+
+function isActionResponseType(responseType: string): boolean {
+  const t = responseType.trim().toLowerCase();
+  return t === 'action_done' || t === 'done' || t === 'success';
+}
+
+function shouldSpeakConfirmation(
+  mode: 'off' | 'brief' | 'verbose',
+  responseType: string,
+  speech: string,
+): boolean {
+  if (mode === 'off') return false;
+  if (mode === 'verbose') return speech.trim().length > 0;
+  if (isActionResponseType(responseType)) return speech.trim().length > 0;
+  const s = speech.toLowerCase();
+  return /turned|set |switched|opened|closed|locked|unlocked|started|stopped/.test(s);
+}
 
 export function useVoiceContext(): VoiceContextValue {
   const ctx = useContext(VoiceContext);
@@ -166,10 +184,18 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   const conn = skydark?.data?.connection ?? null;
   const entityId = app.settings.voiceSatelliteEntityId ?? '';
   const pipelineId = app.settings.voicePipelineId ?? '';
+  const pipelineIdSecondary = app.settings.voicePipelineIdSecondary ?? '';
   const isEnabled = entityId.trim().length > 0 && conn !== null;
   const wakeModelId = parseVoiceWakeWordModelId(app.settings.voiceWakeWordModelId);
-  const wakePhrase = VOICE_WAKE_WORD_MODEL_LABELS[wakeModelId];
+  const wakeModelIdSecondary = parseOptionalVoiceWakeWordModelId(app.settings.voiceWakeWordModelIdSecondary);
+  const wakePhrasePrimary = VOICE_WAKE_WORD_MODEL_LABELS[wakeModelId];
+  const wakePhraseSecondary = wakeModelIdSecondary ? VOICE_WAKE_WORD_MODEL_LABELS[wakeModelIdSecondary] : '';
+  const wakePhrase =
+    wakePhraseSecondary && wakePhraseSecondary !== wakePhrasePrimary
+      ? `${wakePhrasePrimary} or ${wakePhraseSecondary}`
+      : wakePhrasePrimary;
   const wakeListeningEnabled = app.settings.wakeWordEnabled !== false;
+  const voiceResponseMode = app.settings.voiceResponseMode ?? 'brief';
 
   const voiceStateRef = useRef(voiceState.state);
   voiceStateRef.current = voiceState.state;
@@ -178,13 +204,16 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   wakeListeningEnabledRef.current = wakeListeningEnabled;
 
   const pcmChunkHandlerRef = useRef<(pcm: Int16Array) => void | Promise<void>>(() => {});
-  const startListeningRef = useRef<(initiator?: 'wake' | 'tap') => Promise<void>>(async () => {});
+  const startListeningRef = useRef<
+    (initiator?: 'wake' | 'tap', pipelineOverrideId?: string, wakePhraseOverride?: string) => Promise<void>
+  >(async () => {});
   /** How the current/last pipeline was started — drives post-run wake block length. */
   const lastPipelineInitiatorRef = useRef<'wake' | 'tap'>('tap');
 
   // Refs for managers
   const currentHandlerIdRef = useRef(NO_PIPELINE_HANDLER);
   const wakeWordDetectorRef = useRef<WakeWordDetector | null>(null);
+  const wakeWordDetectorSecondaryRef = useRef<WakeWordDetector | null>(null);
   const isDetectingRef = useRef(false);
   const wakePulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const utteranceRef = useRef({
@@ -207,6 +236,8 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
    * handler, so overlapping `detect()` calls corrupt state and can double-fire wake → earcon loop.
    */
   const wakeDetectChainRef = useRef<Promise<void>>(Promise.resolve());
+  const lastIntentSpeechRef = useRef('');
+  const lastIntentResponseTypeRef = useRef('');
 
   const resetUtteranceTracking = useCallback(() => {
     utteranceRef.current = { hadSpeech: false, lastLoudAt: 0, loudMs: 0, endSent: false };
@@ -222,6 +253,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
         : VOICE_WAKE_BLOCK_AFTER_TAP_MS;
     wakeArmNotBeforeRef.current = performance.now() + blockMs;
     wakeWordDetectorRef.current?.flushPending();
+    wakeWordDetectorSecondaryRef.current?.flushPending();
   };
   const handlersRef = useRef({
     audio: createAudioCapture({
@@ -243,6 +275,10 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
         void wakeWordDetectorRef.current.cleanup();
         wakeWordDetectorRef.current = null;
       }
+      if (wakeWordDetectorSecondaryRef.current) {
+        void wakeWordDetectorSecondaryRef.current.cleanup();
+        wakeWordDetectorSecondaryRef.current = null;
+      }
       return;
     }
 
@@ -253,6 +289,15 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
           sensitivity01: wakeWordSensitivity,
         });
         wakeWordDetectorRef.current.setConfig({ sensitivity: wakeWordSensitivity });
+        if (wakeModelIdSecondary && wakeModelIdSecondary !== wakeModelId) {
+          wakeWordDetectorSecondaryRef.current = await createWakeWordDetector({
+            modelId: wakeModelIdSecondary,
+            sensitivity01: wakeWordSensitivity,
+          });
+          wakeWordDetectorSecondaryRef.current.setConfig({ sensitivity: wakeWordSensitivity });
+        } else {
+          wakeWordDetectorSecondaryRef.current = null;
+        }
       } catch (err) {
         console.error(
           '[SkyDark voice] Wake word models failed to load — tap-to-talk may still work, wake word will not:',
@@ -271,8 +316,10 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       setWakePulse(false);
       wakeWordDetectorRef.current?.cleanup();
       wakeWordDetectorRef.current = null;
+      wakeWordDetectorSecondaryRef.current?.cleanup();
+      wakeWordDetectorSecondaryRef.current = null;
     };
-  }, [isEnabled, wakeWordSensitivity, wakeModelId, wakeListeningEnabled]);
+  }, [isEnabled, wakeWordSensitivity, wakeModelId, wakeModelIdSecondary, wakeListeningEnabled]);
 
   // Start always-on audio capture for wake word detection
   useEffect(() => {
@@ -317,8 +364,24 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
                   if (performance.now() < wakeArmNotBeforeRef.current) return;
                   if (suppressWakeUntilQuietRef.current) return;
                   if (voiceStateRef.current !== VoiceState.IDLE) return;
-                  const { detected } = await detector.detect(pcm);
-                  if (!detected) return;
+                  let matchedWakePhrase: string | null = null;
+                  let matchedPipelineId: string | undefined;
+
+                  const primary = await detector.detect(pcm);
+                  if (primary.detected) {
+                    matchedWakePhrase = wakePhrasePrimary;
+                    matchedPipelineId = pipelineId || undefined;
+                  } else {
+                    const detectorSecondary = wakeWordDetectorSecondaryRef.current;
+                    if (detectorSecondary) {
+                      const secondary = await detectorSecondary.detect(pcm);
+                      if (secondary.detected && wakePhraseSecondary) {
+                        matchedWakePhrase = wakePhraseSecondary;
+                        matchedPipelineId = pipelineIdSecondary || undefined;
+                      }
+                    }
+                  }
+                  if (!matchedWakePhrase) return;
                   if (performance.now() < wakeArmNotBeforeRef.current) return;
                   if (suppressWakeUntilQuietRef.current) return;
                   if (voiceStateRef.current !== VoiceState.IDLE || !isDetectingRef.current) return;
@@ -335,7 +398,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
                     setWakePulse(false);
                   }, VOICE_WAKE_PULSE_MS);
 
-                  void startListeningRef.current('wake');
+                  void startListeningRef.current('wake', matchedPipelineId, matchedWakePhrase);
                 })
                 .catch((err) => {
                   console.warn('[SkyDark voice] Wake detection error:', err);
@@ -455,7 +518,11 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     };
   }, [conn, entityId, isEnabled]);
 
-  const startListening = useCallback(async (initiator: 'wake' | 'tap' = 'tap') => {
+  const startListening = useCallback(async (
+    initiator: 'wake' | 'tap' = 'tap',
+    pipelineOverrideId?: string,
+    wakePhraseOverride?: string,
+  ) => {
     if (!conn || !isEnabled || isSkydarkDemo) return;
     if (pipelineSessionActiveRef.current) return;
 
@@ -466,6 +533,9 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'CONNECTING' });
       isDetectingRef.current = false;
       wakeWordDetectorRef.current?.flushPending();
+      wakeWordDetectorSecondaryRef.current?.flushPending();
+      lastIntentSpeechRef.current = '';
+      lastIntentResponseTypeRef.current = '';
       resetUtteranceTracking();
 
       const { pipeline } = handlersRef.current;
@@ -476,27 +546,40 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
           type: 'voice_satellite/run_pipeline',
           entity_id: entityId,
           sample_rate: VOICE_SAMPLE_RATE,
-          pipeline_id: pipelineId || undefined,
+          pipeline_id: (pipelineOverrideId ?? pipelineId) || undefined,
           start_stage: 'stt',
           end_stage: 'tts',
           /** HA core duplicate wake-up suppression (DATA_LAST_WAKE_UP); same contract as voice_satellite card. */
-          wake_word_phrase: wakePhrase,
+          wake_word_phrase: wakePhraseOverride ?? wakePhrasePrimary,
         },
         {
           onSttEnd: (_transcript: string) => {
             dispatch({ type: 'PROCESSING' });
           },
-          onTtsStart: (ttsOutput: string) => {
-            dispatch({ type: 'RESPONDING', transcript: formatVoiceUserMessage(ttsOutput as unknown) });
+          onIntentEnd: (speech: string, responseType: string) => {
+            lastIntentSpeechRef.current = speech;
+            lastIntentResponseTypeRef.current = responseType;
           },
-          onTtsEnd: () => {
-            // End of TTS
+          onTtsStart: (ttsOutput: string) => {
+            const display = ttsOutput || lastIntentSpeechRef.current;
+            dispatch({ type: 'RESPONDING', transcript: formatVoiceUserMessage(display as unknown) });
+          },
+          onTtsEnd: (ttsUrl?: string) => {
+            const speech = lastIntentSpeechRef.current;
+            const responseType = lastIntentResponseTypeRef.current;
+            if (shouldSpeakConfirmation(voiceResponseMode, responseType, speech) && ttsUrl) {
+              void handlersRef.current.tts.play(ttsUrl).catch((err) => {
+                console.warn('Failed to play pipeline TTS', err);
+              });
+            }
           },
           onRunEnd: () => {
             currentHandlerIdRef.current = NO_PIPELINE_HANDLER;
             isDetectingRef.current = true;
             armWakeAfterPipelineEnd();
             pipelineSessionActiveRef.current = false;
+            lastIntentSpeechRef.current = '';
+            lastIntentResponseTypeRef.current = '';
             resetUtteranceTracking();
             dispatch({ type: 'DONE' });
           },
@@ -505,6 +588,8 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
             isDetectingRef.current = true;
             armWakeAfterPipelineEnd();
             pipelineSessionActiveRef.current = false;
+            lastIntentSpeechRef.current = '';
+            lastIntentResponseTypeRef.current = '';
             resetUtteranceTracking();
             if (isDuplicateWakeUpPipelineError(code, message)) {
               dispatch({ type: 'DONE' });
@@ -534,7 +619,15 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       }
       dispatch({ type: 'ERROR', message: raw });
     }
-  }, [conn, entityId, isEnabled, pipelineId, resetUtteranceTracking, wakePhrase]);
+  }, [
+    conn,
+    entityId,
+    isEnabled,
+    pipelineId,
+    resetUtteranceTracking,
+    wakePhrasePrimary,
+    voiceResponseMode,
+  ]);
 
   startListeningRef.current = startListening;
 
@@ -566,6 +659,9 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     setWakeWordSensitivityState(value);
     if (wakeWordDetectorRef.current) {
       wakeWordDetectorRef.current.setConfig({ sensitivity: value });
+    }
+    if (wakeWordDetectorSecondaryRef.current) {
+      wakeWordDetectorSecondaryRef.current.setConfig({ sensitivity: value });
     }
   }, []);
 

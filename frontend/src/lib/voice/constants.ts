@@ -57,19 +57,19 @@ export const VOICE_WAKE_BLOCK_AFTER_TAP_MS = 3_500;
  * After a wake-started pipeline ends, minimum wall-clock wait before re-arm scanning.
  * Long enough to dodge immediate TTS/echo; short enough for a follow-up “Hey …” within a few seconds.
  */
-export const VOICE_WAKE_BLOCK_AFTER_WAKE_MS = 4_500;
+export const VOICE_WAKE_BLOCK_AFTER_WAKE_MS = 2_800;
 
 /**
  * After {@link VOICE_WAKE_BLOCK_AFTER_WAKE_MS}, require this much sub-threshold mic audio in a row
  * so “quiet” actually means decayed playback/room noise, not mid-sentence audio.
  */
-export const VOICE_WAKE_POST_RUN_QUIET_MS = 1_600;
+export const VOICE_WAKE_POST_RUN_QUIET_MS = 900;
 
 /**
  * RMS below this counts toward {@link VOICE_WAKE_POST_RUN_QUIET_MS}.
  * Slightly relaxed so real rooms (HVAC, fan) don’t prevent the quiet streak from ever completing.
  */
-export const VOICE_WAKE_SILENCE_RMS = 0.021;
+export const VOICE_WAKE_SILENCE_RMS = 0.022;
 
 /**
  * Voice control configuration, persisted in AppSettings.

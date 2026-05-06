@@ -116,6 +116,8 @@ export interface AppSettings {
   voiceSatelliteEntityId?: string;
   /** Optional pipeline ID override for voice satellite; undefined = use default pipeline. */
   voicePipelineId?: string;
+  /** Optional second pipeline used when the second wake word triggers. */
+  voicePipelineIdSecondary?: string;
   /** Wake word sensitivity for on-device detection (0.0–1.0, default 0.5). */
   wakeWordSensitivity?: number;
   /** Enable wake word detection (default true when entity ID is configured). */
@@ -125,6 +127,10 @@ export interface AppSettings {
    * Default `hey_jarvis`.
    */
   voiceWakeWordModelId?: string;
+  /** Optional second on-device wake keyword (`__none__` disables the second slot). */
+  voiceWakeWordModelIdSecondary?: string;
+  /** Voice confirmation verbosity after commands complete. */
+  voiceResponseMode?: "off" | "brief" | "verbose";
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -142,9 +148,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   themePreference: "light",
   voiceSatelliteEntityId: "",
   voicePipelineId: "",
+  voicePipelineIdSecondary: "",
   wakeWordSensitivity: 0.5,
   wakeWordEnabled: true,
   voiceWakeWordModelId: "hey_jarvis",
+  voiceWakeWordModelIdSecondary: "__none__",
+  voiceResponseMode: "brief",
 };
 
 interface AppState {
@@ -260,6 +269,9 @@ function normalizeSettings(candidate: Partial<AppSettings> | null | undefined): 
   if (typeof merged.voicePipelineId !== "string") {
     merged.voicePipelineId = "";
   }
+  if (typeof merged.voicePipelineIdSecondary !== "string") {
+    merged.voicePipelineIdSecondary = "";
+  }
   if (typeof merged.wakeWordSensitivity !== "number" || merged.wakeWordSensitivity < 0 || merged.wakeWordSensitivity > 1) {
     merged.wakeWordSensitivity = 0.5;
   }
@@ -278,6 +290,20 @@ function normalizeSettings(candidate: Partial<AppSettings> | null | undefined): 
   ]);
   if (typeof merged.voiceWakeWordModelId !== "string" || !allowedWake.has(merged.voiceWakeWordModelId)) {
     merged.voiceWakeWordModelId = DEFAULT_SETTINGS.voiceWakeWordModelId;
+  }
+  if (
+    typeof merged.voiceWakeWordModelIdSecondary !== "string" ||
+    (!allowedWake.has(merged.voiceWakeWordModelIdSecondary) &&
+      merged.voiceWakeWordModelIdSecondary !== "__none__")
+  ) {
+    merged.voiceWakeWordModelIdSecondary = DEFAULT_SETTINGS.voiceWakeWordModelIdSecondary;
+  }
+  if (
+    merged.voiceResponseMode !== "off" &&
+    merged.voiceResponseMode !== "brief" &&
+    merged.voiceResponseMode !== "verbose"
+  ) {
+    merged.voiceResponseMode = DEFAULT_SETTINGS.voiceResponseMode;
   }
   return merged;
 }

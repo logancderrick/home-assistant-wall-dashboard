@@ -15,6 +15,7 @@ export const VOICE_WAKE_WORD_MODEL_IDS = [
 ] as const;
 
 export type VoiceWakeWordModelId = (typeof VOICE_WAKE_WORD_MODEL_IDS)[number];
+export const VOICE_WAKE_WORD_NONE = "__none__";
 
 export const VOICE_WAKE_WORD_MODEL_LABELS: Record<VoiceWakeWordModelId, string> = {
   ok_nabu: "Okay Nabu",
@@ -179,4 +180,13 @@ export function parseVoiceWakeWordModelId(raw: string | undefined | null): Voice
   const id = String(raw ?? "").trim();
   if (id && isVoiceWakeWordModelId(id)) return id;
   return "hey_jarvis";
+}
+
+export function parseOptionalVoiceWakeWordModelId(
+  raw: string | undefined | null,
+): VoiceWakeWordModelId | null {
+  const id = String(raw ?? "").trim();
+  if (!id || id === VOICE_WAKE_WORD_NONE) return null;
+  if (isVoiceWakeWordModelId(id)) return id;
+  return null;
 }

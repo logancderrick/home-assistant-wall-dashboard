@@ -38,8 +38,9 @@ function pipelineErrorText(e: Record<string, unknown>, pipelineEvent: PipelineEv
 
 export interface PipelineEventCallbacks {
   onSttEnd: (transcript: string) => void;
+  onIntentEnd: (speech: string, responseType: string) => void;
   onTtsStart: (ttsOutput: string) => void;
-  onTtsEnd: () => void;
+  onTtsEnd: (ttsUrl?: string) => void;
   onError: (code: string, message: string) => void;
   onRunEnd: () => void;
 }
@@ -124,12 +125,23 @@ export function createPipelineComms(): PipelineCommsHandle {
               const pipelineEvent = e as unknown as PipelineEvent;
               const transcript = pipelineEvent.data?.stt_output?.text ?? "";
               callbacks.onSttEnd(transcript);
+            } else if (type === "intent-end") {
+              const pipelineEvent = e as unknown as PipelineEvent;
+              const response = pipelineEvent.data?.intent_output?.response;
+              const speech = response?.speech?.plain?.speech ?? "";
+              const responseType = response?.response_type ?? "";
+              callbacks.onIntentEnd(speech, responseType);
             } else if (type === "tts-start") {
               const pipelineEvent = e as unknown as PipelineEvent;
-              const ttsOutput = pipelineEvent.data?.tts_output?.text ?? "";
+              const ttsOutput =
+                pipelineEvent.data?.tts_output?.text ??
+                pipelineEvent.data?.intent_output?.response?.speech?.plain?.speech ??
+                "";
               callbacks.onTtsStart(ttsOutput);
             } else if (type === "tts-end") {
-              callbacks.onTtsEnd();
+              const pipelineEvent = e as unknown as PipelineEvent;
+              const ttsUrl = pipelineEvent.data?.tts_output?.url;
+              callbacks.onTtsEnd(ttsUrl);
             } else if (type === "run-end") {
               callbacks.onRunEnd();
             } else if (type === "error") {

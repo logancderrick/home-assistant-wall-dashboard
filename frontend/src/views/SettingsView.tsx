@@ -27,7 +27,9 @@ import HaEntitySelect from "../components/Settings/HaEntitySelect";
 import { fetchAssistPipelines, type AssistPipelineSummary } from "../lib/skyDarkApi";
 import { isSkydarkDemo } from "../lib/demoMode";
 import {
+  VOICE_WAKE_WORD_NONE,
   parseVoiceWakeWordModelId,
+  parseOptionalVoiceWakeWordModelId,
   VOICE_WAKE_WORD_MODEL_IDS,
   VOICE_WAKE_WORD_MODEL_LABELS,
 } from "../lib/voice/wakeWord";
@@ -768,6 +770,28 @@ export default function SettingsView() {
               </div>
               <div className="py-3">
                 <label className="block text-sm font-medium text-skydark-text mb-1.5">
+                  Voice response confirmations
+                </label>
+                <select
+                  className="input-skydark w-full max-w-lg text-sm"
+                  value={settings.voiceResponseMode ?? "brief"}
+                  onChange={(e) =>
+                    setSettings({
+                      voiceResponseMode: e.target.value as "off" | "brief" | "verbose",
+                    })
+                  }
+                  aria-label="Voice response confirmation mode"
+                >
+                  <option value="off">Off (no spoken confirmations)</option>
+                  <option value="brief">Brief (confirm actions only)</option>
+                  <option value="verbose">Verbose (speak all assistant responses)</option>
+                </select>
+                <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
+                  Example brief response: “Front porch lights turned off.” Use verbose if you want all answers spoken.
+                </p>
+              </div>
+              <div className="py-3">
+                <label className="block text-sm font-medium text-skydark-text mb-1.5">
                   Assist Satellite entity ID
                 </label>
                 <HaEntitySelect
@@ -802,6 +826,25 @@ export default function SettingsView() {
                 </select>
                 <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
                   Matches the integration’s bundled TFLite classifiers. The mic button hint uses this phrase (e.g. Hey Jarvis).
+                </p>
+              </div>
+              <div className="py-3">
+                <label className="block text-sm font-medium text-skydark-text mb-1.5">Second wake word (optional)</label>
+                <select
+                  className="input-skydark w-full max-w-lg text-sm"
+                  value={parseOptionalVoiceWakeWordModelId(settings.voiceWakeWordModelIdSecondary) ?? VOICE_WAKE_WORD_NONE}
+                  onChange={(e) => setSettings({ voiceWakeWordModelIdSecondary: e.target.value })}
+                  aria-label="Second wake word model"
+                >
+                  <option value={VOICE_WAKE_WORD_NONE}>No second wake word</option>
+                  {VOICE_WAKE_WORD_MODEL_IDS.map((id) => (
+                    <option key={id} value={id}>
+                      {VOICE_WAKE_WORD_MODEL_LABELS[id]}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
+                  When set, each wake phrase can target a different Assist pipeline.
                 </p>
               </div>
               <div className="py-3">
@@ -852,6 +895,47 @@ export default function SettingsView() {
                     </p>
                   </>
                 )}
+              </div>
+              <div className="py-3">
+                <label className="block text-sm font-medium text-skydark-text mb-1.5">
+                  Second wake word pipeline (optional)
+                </label>
+                {assistPipelines.length > 0 ? (
+                  <select
+                    className="input-skydark w-full max-w-lg text-sm"
+                    value={settings.voicePipelineIdSecondary ?? ""}
+                    onChange={(e) =>
+                      setSettings({ voicePipelineIdSecondary: e.target.value.trim() || undefined })
+                    }
+                    aria-label="Second wake assist pipeline"
+                  >
+                    <option value="">Default pipeline</option>
+                    {settings.voicePipelineIdSecondary &&
+                    !assistPipelines.some((p) => p.id === settings.voicePipelineIdSecondary) ? (
+                      <option value={settings.voicePipelineIdSecondary}>
+                        Current: {settings.voicePipelineIdSecondary}
+                      </option>
+                    ) : null}
+                    {assistPipelines.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.id})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    className="input-skydark w-full max-w-lg font-mono text-sm"
+                    placeholder="Leave empty for default pipeline"
+                    value={settings.voicePipelineIdSecondary ?? ""}
+                    onChange={(e) => setSettings({ voicePipelineIdSecondary: e.target.value.trim() || undefined })}
+                    spellCheck={false}
+                    aria-label="Second wake assist pipeline ID (manual)"
+                  />
+                )}
+                <p className="text-xs text-skydark-text-secondary mt-2 max-w-lg">
+                  Used only when the second wake phrase triggers. Leave empty to use the default pipeline.
+                </p>
               </div>
               <div className="py-3">
                 <label className="block text-sm font-medium text-skydark-text mb-3">

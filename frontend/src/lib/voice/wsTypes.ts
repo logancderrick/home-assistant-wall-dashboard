@@ -89,8 +89,15 @@ export interface PipelineEvent {
   type: string;
   data?: {
     stt_output?: { text: string };
-    tts_output?: { text: string; media_id?: string };
-    intent_output?: { response?: { speech?: string } };
+    tts_output?: { text?: string; media_id?: string; url?: string };
+    intent_output?: {
+      response?: {
+        response_type?: string;
+        speech?: {
+          plain?: { speech?: string | null };
+        };
+      };
+    };
     message?: string;
     code?: string;
   };
