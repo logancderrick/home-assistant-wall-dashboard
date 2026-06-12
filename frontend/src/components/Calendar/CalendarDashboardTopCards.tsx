@@ -1,5 +1,6 @@
 import { useWeatherData } from "../../hooks/useWeeklyWeather";
 import ImprovedWeatherCard from "./ImprovedWeatherCard";
+import { useAppContext } from "../../contexts/AppContext";
 
 /**
  * Weather header for the top of the calendar page only.
@@ -7,6 +8,7 @@ import ImprovedWeatherCard from "./ImprovedWeatherCard";
  */
 export default function CalendarDashboardTopCards() {
   const weather = useWeatherData();
+  const { settings } = useAppContext();
 
   return (
     <div className="mb-5 shrink-0">
@@ -14,6 +16,7 @@ export default function CalendarDashboardTopCards() {
         current={weather.current}
         weekly={weather.weekly}
         locationLabel={weather.locationLabel}
+        backgroundImageUrl={settings.weatherBackgroundImageUrl}
       />
     </div>
   );

@@ -135,6 +135,8 @@ export interface AppSettings {
   voiceDefaultListId?: string;
   /** Optional HA `timer.*` for spoken countdowns ("timer 10 minutes"); otherwise a calendar block is created. */
   voiceTimerEntityId?: string;
+  /** Optional custom background image URL (data URL) for weather card. */
+  weatherBackgroundImageUrl?: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -321,6 +323,13 @@ function normalizeSettings(candidate: Partial<AppSettings> | null | undefined): 
     else {
       const t = merged.voiceTimerEntityId.trim();
       merged.voiceTimerEntityId = t || undefined;
+    }
+  }
+  if (merged.weatherBackgroundImageUrl !== undefined) {
+    if (typeof merged.weatherBackgroundImageUrl !== "string") merged.weatherBackgroundImageUrl = undefined;
+    else {
+      const t = merged.weatherBackgroundImageUrl.trim();
+      merged.weatherBackgroundImageUrl = t || undefined;
     }
   }
   return merged;

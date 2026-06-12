@@ -291,6 +291,8 @@ export interface ImprovedWeatherCardProps {
   /** Falls back to "Home" like the reference card. */
   locationFallback?: string;
   className?: string;
+  /** Optional custom background image URL (data URL). */
+  backgroundImageUrl?: string;
 }
 
 export default function ImprovedWeatherCard({
@@ -299,6 +301,7 @@ export default function ImprovedWeatherCard({
   locationLabel,
   locationFallback = "Home",
   className = "",
+  backgroundImageUrl,
 }: ImprovedWeatherCardProps) {
   const days = useMemo(() => weekly.slice(0, 9), [weekly]);
   const today = days[0];
@@ -306,6 +309,7 @@ export default function ImprovedWeatherCard({
 
 
   const condition = cur?.condition ?? "sunny";
+  const bgImageUrl = backgroundImageUrl || weatherCardBackgroundUrl;
 
 
   return (
@@ -316,7 +320,7 @@ export default function ImprovedWeatherCard({
     >
       {/* Img layer avoids blank CSS background repaints after lazy calendar remount in Chromium/WebKit. */}
       <img
-        src={weatherCardBackgroundUrl}
+        src={bgImageUrl}
         alt=""
         aria-hidden
         decoding="async"

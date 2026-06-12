@@ -663,6 +663,51 @@ export default function SettingsView() {
                   />
                 }
               />
+              <div className="py-3 border-t border-skydark-border pt-4">
+                <label className="block text-sm font-medium text-skydark-text mb-1.5">
+                  Weather card background image
+                </label>
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  onChange={(e) => {
+                    const file = e.currentTarget.files?.[0];
+                    if (!file) return;
+                    if (file.size > 5 * 1024 * 1024) {
+                      alert("Image must be smaller than 5 MB");
+                      e.currentTarget.value = "";
+                      return;
+                    }
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      const dataUrl = reader.result as string;
+                      setSettings({ weatherBackgroundImageUrl: dataUrl });
+                      e.currentTarget.value = "";
+                    };
+                    reader.readAsDataURL(file);
+                  }}
+                  className="input-skydark max-w-md"
+                />
+                {settings.weatherBackgroundImageUrl && (
+                  <div className="mt-3">
+                    <img
+                      src={settings.weatherBackgroundImageUrl}
+                      alt="Weather card background preview"
+                      className="h-32 w-auto rounded-lg border border-skydark-border"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setSettings({ weatherBackgroundImageUrl: undefined })}
+                      className="mt-2 text-sm font-medium text-red-600 hover:underline"
+                    >
+                      Remove image
+                    </button>
+                  </div>
+                )}
+                <p className="mt-1 text-xs text-skydark-text-secondary">
+                  PNG or JPG, max 5 MB. Leave empty for default background.
+                </p>
+              </div>
             </SettingsSection>
           </>
         )}
