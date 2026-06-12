@@ -143,6 +143,7 @@ export async function getHAConnection(): Promise<Connection> {
       console.debug("[SkyDark] Reusing parent HA WebSocket connection");
       return parentConn;
     }
+    console.debug("[SkyDark] No parent connection found, attempting OAuth/stored tokens");
 
     // 2. Dev: long-lived token (no OAuth — instant reconnect on every refresh)
     if (useDevLongLivedTokenAuth()) {
@@ -186,12 +187,15 @@ export async function getHAConnection(): Promise<Connection> {
     }
 
     const hassUrl = getHassUrl();
+    console.debug("[SkyDark] Attempting auth at", hassUrl);
     const auth = await getAuth({
       hassUrl,
       loadTokens: loadStoredTokens,
       saveTokens,
     }).catch((err) => {
+      console.debug("[SkyDark] getAuth error:", err);
       if (err === ERR_HASS_HOST_REQUIRED || err === ERR_INVALID_AUTH) {
+        console.debug("[SkyDark] Retrying OAuth from scratch");
         return getAuth({ hassUrl });
       }
       throw err;
