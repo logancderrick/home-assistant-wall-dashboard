@@ -43,7 +43,7 @@ class SkyDarkRootView(HomeAssistantView):
 
     url = PANEL_URL
     name = "skydark_root"
-    requires_auth = False
+    requires_auth = True
 
     async def get(self, request):  # type: ignore[override]
         from aiohttp import web
@@ -59,7 +59,7 @@ class SkyDarkRootSlashView(HomeAssistantView):
 
     url = f"{PANEL_URL}/"
     name = "skydark_root_slash"
-    requires_auth = False
+    requires_auth = True
 
     async def get(self, request):  # type: ignore[override]
         from aiohttp import web
@@ -80,7 +80,7 @@ class SkyDarkIndexView(HomeAssistantView):
 
     url = f"{PANEL_URL}/index.html"
     name = "skydark_index"
-    requires_auth = False
+    requires_auth = True
 
     def __init__(self, www_path: Path) -> None:
         self._index = www_path / "index.html"
